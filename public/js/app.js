@@ -5,13 +5,13 @@
 import { api, ENGINES, LANGUAGES, createClient, fetchBackends, saveBackends } from './api.js';
 import { ensureRenditions, activeRendition, renditionById, defaultRenditionId, chunkState, markChunk, isChunkDone, chapterDoneCount, migrateChunkStates } from './model.js';
 import { store, newId } from './store.js';
-import { parseFile, parsePlainText, chunkBlocks, detectLanguage, extractNotes, looksLikeVerse } from './parser.js';
+import { parseFile, parsePlainText, chunkBlocks, detectLanguage, extractNotes, looksLikeVerse, stripLineNumbers, stripForSpeech } from './parser.js';
 import { Player } from './player.js';
 import { Generator } from './generator.js';
 import { exportChapterWav, exportBookWav, downloadBlob, safeFilename } from './export.js';
 import { createZip, readZipEntries, readZipEntry } from './zip.js';
 
-const APP_VERSION = '2026-11-13.4';
+const APP_VERSION = '2026-11-13.6';
 window.__APP_VERSION__ = APP_VERSION;
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -592,8 +592,42 @@ async function rechunkChapter(chapter) {
   return chapter;
 }
 
+/** 老书里已经存进去的行号标注，打开章节时补一次 */
+async function migrateLineNumbers(chapter) {
+  if (!chapter || chapter.lineNoChecked) return 0;
+  chapter.lineNoChecked = true;
+  const res = stripLineNumbers(chapter.blocks || []);
+  if (!res.removed) {
+    store.put('chapters', chapter).catch(() => {});
+    return 0;
+  }
+  chapter.blocks = res.blocks;
+  const baseRid = defaultRenditionId(state.book) || ridNow();
+  const hasAudio = (chapter.chunks || []).some((c) => isChunkDone(c, baseRid));
+  // 已经有音频就不动分段（避免和已有声音错位），等用户重新生成时自然带上新文本
+  if (!hasAudio) {
+    chapter.chunks = chunkBlocks(chapter.blocks, chapter.chunkChars || state.settings.maxChars, { merge: chapter.verse });
+    chapter.chunkAlgo = CHUNK_ALGO;
+  } else {
+    // 已经有音频：只把显示文本末尾的行号去掉，声音里的数字需要重新生成才能消掉
+    for (const c of chapter.chunks || []) {
+      if (c.text) c.text = c.text.replace(/\s+\d{1,4}$/, '');
+    }
+  }
+  chapter.updatedAt = Date.now();
+  await store.put('chapters', chapter).catch(() => {});
+  chapter._lineNoHadAudio = hasAudio;
+  return res.removed;
+}
+
 /** 章节数据升级 / 重新分块 */
 async function ensureChunks(chapter, maxChars) {
+  const stripped = await migrateLineNumbers(chapter);
+  if (stripped) {
+    toast(chapter._lineNoHadAudio
+      ? `已识别本章 ${stripped} 处行号（照常显示，不再朗读）；已有音频里还念着数字，可点「重新生成」更新`
+      : `已识别本章 ${stripped} 处行号：照常显示，朗读时跳过`);
+  }
   // 老数据的 chunk.status 属于「默认音色」那个版本，不能跟着当前视图走
   const legacyRid = defaultRenditionId(state.book) || ridNow();
   if (legacyRid && migrateChunkStates(chapter, legacyRid)) store.put('chapters', chapter).catch(() => {});
@@ -807,6 +841,14 @@ function renderReader() {
         fillSpanWithMarks(span, block, seg);
         p.append(span);
       }
+    }
+    // 原书行号：显示出来，但不进入朗读文本
+    if (block.lineNo) {
+      p.append(el('sup', {
+        class: 'ln',
+        title: `原书第 ${block.lineNo} 行`,
+        dataset: { ln: String(block.lineNo) },
+      }, String(block.lineNo)));
     }
     body.append(p);
   });
@@ -1953,13 +1995,16 @@ async function importParsed(parsed, meta = {}) {
   const chapterRecords = parsed.chapters
     .map((c) => {
       const raw = c.blocks.filter((b) => b.type === 'br' || (b.text && b.text.trim()));
-      const { blocks, notes } = extractNotes(raw);
+      // 诗行末尾的行号标注（"……车子， 245"）不参与朗读
+      const lineNo = stripLineNumbers(raw);
+      const { blocks, notes } = extractNotes(lineNo.blocks);
       const verse = looksLikeVerse(blocks);
       const chunks = chunkBlocks(blocks, maxChars, { merge: verse });
       return {
         title: (c.title || '').trim(),
         part: (c.part || '').trim(),
         blocks,
+        lineNoChecked: true,
         notes,
         verse,
         chunks,

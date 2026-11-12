@@ -1111,3 +1111,16 @@ body.notes-open #app { grid-template-columns: 300px minmax(0, 1fr) 340px; }
 }
 .search-clear:hover { color: var(--text); border-color: var(--text-faint); }
 .toc-list { min-height: 20px; }
+
+/* 原书行号：只显示，不朗读 */
+.read-body sup.ln {
+  font-size: .58em;
+  color: var(--text-faint);
+  margin-left: .45em;
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+  vertical-align: super;
+  user-select: none;
+  cursor: help;
+}
+.read-body sup.ln:hover { color: var(--accent); }

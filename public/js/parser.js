@@ -563,6 +563,49 @@ export function extractNotes(blocks, opts = {}) {
  * 判断章节是否为「分行排版」（史诗、诗歌、分行译文）
  * 特征：段落多而短、多数行不以句末标点结尾
  */
+/* 行末行号："……车子， 245" / "……他说　250" */
+const LINE_NO_RE = /[ \t\u00a0\u3000]+(\d{1,4})$/;
+
+/**
+ * 去掉诗行末尾的行号标注。
+ * 只看单个数字容易误伤正文（"他数到 20"），所以要求：
+ *   - 至少 3 处
+ *   - 编号的步长有稳定的众数（通常每 5 行标一次）
+ * 命中的数字会记到 block.lineNo 上，方便以后需要时显示。
+ */
+export function stripLineNumbers(blocks) {
+  const hits = [];
+  blocks.forEach((b, i) => {
+    if (b.type !== 'p') return;
+    const m = b.text.match(LINE_NO_RE);
+    if (!m) return;
+    const n = Number(m[1]);
+    if (!n || n > 9999) return;
+    hits.push({ i, n, cut: m[0].length });
+  });
+  if (hits.length < 3) return { blocks, removed: 0 };
+
+  const deltas = [];
+  for (let k = 1; k < hits.length; k++) deltas.push(hits[k].n - hits[k - 1].n);
+  const freq = new Map();
+  for (const d of deltas) freq.set(d, (freq.get(d) || 0) + 1);
+  let modal = 0;
+  let modalCount = 0;
+  for (const [d, c] of freq) {
+    if (c > modalCount) { modal = d; modalCount = c; }
+  }
+  const steady = modal >= 1 && modal <= 20 && modalCount >= Math.max(2, Math.ceil(deltas.length * 0.6));
+  if (!steady) return { blocks, removed: 0 };
+
+  const byIndex = new Map(hits.map((h) => [h.i, h]));
+  const out = blocks.map((b, i) => {
+    const h = byIndex.get(i);
+    if (!h) return b;
+    return { ...b, text: b.text.slice(0, b.text.length - h.cut).replace(/\s+$/, ''), lineNo: h.n };
+  });
+  return { blocks: out, removed: hits.length };
+}
+
 export function looksLikeVerse(blocks) {
   const ps = blocks.filter((b) => b.type === 'p' && b.text.length > 2);
   if (ps.length < 10) return false;

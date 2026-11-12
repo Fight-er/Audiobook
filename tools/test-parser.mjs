@@ -4,7 +4,7 @@
  */
 import {
   splitChapters, chunkBlocks, splitSentences, sentenceRanges, parsePlainText,
-  detectLanguage, normalizeText, extractNotes, stripForSpeech, looksLikeVerse, endsSentence,
+  detectLanguage, normalizeText, extractNotes, stripForSpeech, looksLikeVerse, endsSentence, stripLineNumbers,
 } from '../public/js/parser.js';
 
 let pass = 0;
@@ -203,6 +203,34 @@ const merged = extractNotes([
 ]);
 check('同一段里挤着的注释能拆开', merged.notes.length === 2, JSON.stringify(merged.notes));
 
+
+console.log('\n【诗行行号标注】');
+const lineNoSample = [
+  '他这样说，众人一片沉默， 5',
+  '过了很久，年迈的国王开口， 10',
+  '望着眼前这位女神般的女子， 15',
+  '心中翻涌着说不出的滋味。 20',
+  '最后一段没有行号。',
+].map((t) => ({ type: 'p', text: t }));
+const stripped = stripLineNumbers(lineNoSample);
+check('识别并去掉了行号', stripped.removed === 4, String(stripped.removed));
+check('行号后的文本保持完整', stripped.blocks[0].text === '他这样说，众人一片沉默，', stripped.blocks[0].text);
+check('行号被记录下来', stripped.blocks[3].lineNo === 20, String(stripped.blocks[3].lineNo));
+check('没有行号的段落不受影响', stripped.blocks[4].text === '最后一段没有行号。');
+
+const proseNumbers = [
+  '他数到 20',
+  '价格是 30',
+  '那一年是 1999',
+].map((t) => ({ type: 'p', text: t }));
+check('正文里的普通数字不会被误删', stripLineNumbers(proseNumbers).removed === 0,
+  String(stripLineNumbers(proseNumbers).removed));
+
+const twoOnly = [
+  '第一句， 5',
+  '第二句， 10',
+].map((t) => ({ type: 'p', text: t }));
+check('少于 3 处不动手', stripLineNumbers(twoOnly).removed === 0);
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);
