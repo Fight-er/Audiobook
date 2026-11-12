@@ -1,0 +1,16 @@
+// 运行时/测试产物
+_vb*.log
+_vb*.err
+_body*.json
+_openapi.json
+_dom.html
+_test.wav
+_test.hdr
+_shot.png
+_edge*/
+_ep*/
+tools/node_modules/
+tools/.npmcache/
+*.tmp
+.DS_Store
+Thumbs.db

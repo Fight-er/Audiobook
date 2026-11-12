@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>有声书 · 本地朗读与离线语音书生成</title>
+  <meta name="description" content="本地有声书阅读器：导入 txt / epub，用 Voicebox 在本机 GPU 上离线合成语音书，断网也能继续听。" />
+  <meta name="theme-color" content="#0e1014" />
+  <link rel="stylesheet" href="/css/app.css?v=13" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="brand">
+        <div class="logo">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+            <path d="M9 7h7M9 11h5" />
+          </svg>
+        </div>
+        <div>
+          <h1>有声书</h1>
+          <small>本地合成 · 离线收听</small>
+        </div>
+      </div>
+
+      <div class="side-tabs">
+        <button class="side-tab active" data-tab="library">书库</button>
+        <button class="side-tab" data-tab="toc">目录</button>
+      </div>
+
+      <div class="side-body">
+        <div id="pane-library"></div>
+        <div id="pane-toc" class="hidden"></div>
+      </div>
+
+      <div class="side-foot">
+        <button class="btn primary" id="btn-import">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+          导入书籍
+        </button>
+        <div style="display:flex;gap:8px">
+          <button class="btn" id="btn-settings" style="flex:1">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            设置
+          </button>
+          <button class="btn" id="btn-help" title="快捷键与说明" style="flex:0 0 auto">?</button>
+        </div>
+      </div>
+    </aside>
+
+    <main id="main">
+      <div class="topbar">
+        <div style="min-width:0;flex:1">
+          <div class="topbar-title" id="top-title">未打开书籍</div>
+          <div class="topbar-sub" id="top-sub">导入一本 txt 或 epub 开始</div>
+        </div>
+        <div class="spacer"></div>
+        <button class="btn" id="btn-rendition" disabled title="音色版本：同一本书可保存多个声音">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
+          <span>音色</span>
+        </button>
+        <span class="chip" id="chip-voicebox" title="Voicebox 连接状态">检测中…</span>
+        <button class="btn" id="btn-notes" title="显示 / 隐藏右侧注释对照栏" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v13H8l-4 4z"/><path d="M9 9h7M9 12h4"/></svg>
+          注释
+        </button>
+        <button class="btn" id="btn-generate-chapter" disabled title="生成当前章节的语音书（生成中点击会加入队列）">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>
+          <span id="gen-btn-label">生成本章</span>
+        </button>
+        <button class="btn" id="btn-export-chapter" disabled title="把本章已生成的音频导出为 WAV">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+          导出
+        </button>
+        <button class="btn" id="btn-more" title="更多操作：重新生成、清除音频">⋯</button>
+      </div>
+
+      <div id="offline-banner" class="offline-banner hidden">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 1l22 22"/><path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55"/><path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39"/><path d="M10.71 5.05A16 16 0 0 1 22.58 9"/><path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><path d="M12 20h.01"/></svg>
+        <span>Voicebox 未连接 —— 你仍可播放本机已生成的音频；生成新语音需要启动 Voicebox 服务。</span>
+      </div>
+
+      <div class="reader-scroll" id="reader-scroll">
+        <div class="reader-inner" id="reader"></div>
+      </div>
+
+      <div id="gen-panel" class="gen-panel hidden">
+        <div class="gen-head">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>
+          <span id="gen-title">正在生成本地语音</span>
+          <div style="flex:1"></div>
+          <button class="btn ghost sm" id="gen-collapse" title="隐藏面板">✕</button>
+        </div>
+        <div class="gen-body">
+          <div class="gen-bar"><i id="gen-bar-fill"></i></div>
+          <div class="gen-stats"><span id="gen-progress">0 / 0</span><span id="gen-eta"></span></div>
+          <div class="gen-current" id="gen-current">准备中…</div>
+          <div class="gen-queue hidden" id="gen-queue">
+            <span>队列中还有 0 个任务</span>
+            <button class="btn ghost sm" id="gen-queue-clear">清空</button>
+          </div>
+          <div class="gen-actions">
+            <button class="btn sm" id="gen-pause">暂停</button>
+            <button class="btn sm danger" id="gen-stop">停止</button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <aside id="notes-panel" class="hidden">
+      <div class="notes-head">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v13H8l-4 4z"/><path d="M9 9h7M9 12h4"/></svg>
+        <h2>注释</h2>
+        <span class="notes-count" id="notes-count">0</span>
+        <div style="flex:1"></div>
+        <button class="btn ghost sm" id="notes-close" title="收起">✕</button>
+      </div>
+      <div class="notes-body" id="notes-body"></div>
+    </aside>
+  </div>
+
+  <footer id="playerbar">
+    <div class="pb-progress">
+      <div class="pb-buffer" id="pb-buffer" style="transform:scaleX(0)"></div>
+      <input type="range" class="pb-slider" id="pb-slider" min="0" max="1000" value="0" step="1" disabled />
+    </div>
+    <div class="pb-main">
+      <div class="pb-now">
+        <div class="mini-cover" id="pb-cover">书</div>
+        <div class="pb-text">
+          <div class="pb-title" id="pb-title">未在播放</div>
+          <div class="pb-sub" id="pb-sub">选择章节后点击播放</div>
+        </div>
+      </div>
+      <div class="pb-controls">
+        <button class="pb-btn" id="pb-prev-chapter" title="上一章 (↑)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 18l-8-6 8-6v12z"/><path d="M6 5v14"/></svg>
+        </button>
+        <button class="pb-btn" id="pb-back" title="后退 15 秒 (←)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><text x="12" y="16" font-size="8" text-anchor="middle" stroke="none" fill="currentColor">15</text></svg>
+        </button>
+        <button class="pb-btn play" id="pb-play" title="播放 / 暂停 (空格)">
+          <svg id="pb-play-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5-13-7.5z"/></svg>
+        </button>
+        <button class="pb-btn" id="pb-forward" title="快进 15 秒 (→)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/><text x="12" y="16" font-size="8" text-anchor="middle" stroke="none" fill="currentColor">15</text></svg>
+        </button>
+        <button class="pb-btn" id="pb-next-chapter" title="下一章 (↓)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 18l8-6-8-6v12z"/><path d="M18 5v14"/></svg>
+        </button>
+      </div>
+      <div class="pb-right">
+        <span class="pb-time" id="pb-time">0:00 / 0:00</span>
+        <select class="speed-select" id="pb-speed" title="播放速度">
+          <option value="0.75">0.75×</option>
+          <option value="1" selected>1.0×</option>
+          <option value="1.25">1.25×</option>
+          <option value="1.5">1.5×</option>
+          <option value="1.75">1.75×</option>
+          <option value="2">2.0×</option>
+          <option value="2.5">2.5×</option>
+        </select>
+        <button class="pb-btn" id="pb-sleep" title="定时停止">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 1.5"/><path d="M9 2h6"/></svg>
+        </button>
+        <button class="pb-btn" id="pb-autonext" title="自动播放下一章（开启）">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/><path d="M17 15l3 3 3-3" transform="translate(-1,-1)"/></svg>
+        </button>
+      </div>
+    </div>
+  </footer>
+
+  <div id="toast-wrap"></div>
+
+  <button id="gen-pill" class="gen-pill hidden" title="展开生成面板">
+    <span class="gp-dot"></span><span id="gen-pill-text">生成中…</span>
+  </button>
+
+  <script>
+    /* 启动守卫：脚本崩了/被缓存旧版本时，给用户一个看得见的出口 */
+    (function () {
+      var shown = false;
+
+      function hardReset() {
+        var done = function () { location.reload(); };
+        var jobs = [];
+        try {
+          if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+            jobs.push(navigator.serviceWorker.getRegistrations().then(function (rs) {
+              return Promise.all(rs.map(function (r) { return r.unregister(); }));
+            }).catch(function () {}));
+          }
+        } catch (e) {}
+        try {
+          if (window.caches) {
+            jobs.push(caches.keys().then(function (keys) {
+              return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+            }).catch(function () {}));
+          }
+        } catch (e) {}
+        Promise.all(jobs).then(function () {
+          // 再带一个随机参数，绕开所有中间缓存
+          location.replace(location.pathname + '?r=' + Date.now());
+        }).catch(done);
+      }
+
+      window.__showAppError__ = function (title, detail) {
+        if (shown) return;
+        shown = true;
+        var box = document.createElement('div');
+        box.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:9999;' +
+          'max-width:min(680px,92vw);padding:16px 18px;border-radius:12px;background:#2a1518;color:#ffd9d9;' +
+          'border:1px solid #7a2b30;box-shadow:0 16px 40px rgba(0,0,0,.55);font:13px/1.7 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;';
+        var h = document.createElement('div');
+        h.textContent = '⚠ ' + title;
+        h.style.cssText = 'font-weight:700;margin-bottom:6px;color:#ff9a9a;';
+        var d = document.createElement('pre');
+        d.textContent = (detail || '').slice(0, 1200);
+        d.style.cssText = 'margin:0 0 10px;white-space:pre-wrap;word-break:break-all;font:12px/1.6 ui-monospace,Consolas,monospace;opacity:.85;max-height:40vh;overflow:auto;';
+        var row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+        var fix = document.createElement('button');
+        fix.textContent = '清除缓存并重载';
+        fix.style.cssText = 'cursor:pointer;border:0;border-radius:8px;padding:7px 12px;background:#e5534b;color:#fff;font:inherit;font-weight:600;';
+        fix.onclick = hardReset;
+        var close = document.createElement('button');
+        close.textContent = '关闭';
+        close.style.cssText = 'cursor:pointer;border:1px solid #7a2b30;border-radius:8px;padding:7px 12px;background:transparent;color:#ffd9d9;font:inherit;';
+        close.onclick = function () { box.remove(); shown = false; };
+        row.appendChild(fix);
+        row.appendChild(close);
+        box.appendChild(h);
+        if (detail) box.appendChild(d);
+        box.appendChild(row);
+        document.body.appendChild(box);
+      };
+
+      window.addEventListener('error', function (e) {
+        if (e && e.target && e.target.tagName === 'SCRIPT') {
+          window.__showAppError__('脚本加载失败', String(e.target.src || ''));
+          return;
+        }
+        window.__showAppError__('页面脚本出错：' + (e.message || '未知错误'), (e.error && e.error.stack) || '');
+      });
+
+      window.addEventListener('unhandledrejection', function (e) {
+        var r = e.reason || {};
+        window.__showAppError__('未处理的异步错误：' + (r.message || r), r.stack || '');
+      });
+
+      // 脚本完全没跑起来（多半是缓存了旧版本或文件损坏）
+      setTimeout(function () {
+        if (!window.__APP_BOOTED__) {
+          window.__showAppError__(
+            '前端脚本没有正常启动',
+            '页面已加载，但应用逻辑没有运行。通常是浏览器缓存了旧版本的 js 文件——点「清除缓存并重载」即可修复。'
+          );
+        }
+      }, 4000);
+    })();
+  </script>
+
+  <script type="module" src="/js/app.js?v=13"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('/sw.js').catch(function () {});
+      });
+    }
+  </script>
+</body>
+</html>

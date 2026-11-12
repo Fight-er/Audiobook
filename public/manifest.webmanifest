@@ -1,0 +1,19 @@
+{
+  "name": "有声书 · 本地朗读与离线语音书",
+  "short_name": "有声书",
+  "description": "导入 txt / epub，用本机 Voicebox 模型离线合成语音书，断网也能继续听。",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0e1014",
+  "theme_color": "#0e1014",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "audiobook-reader",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "本地有声书阅读器 + 离线语音合成（Voicebox / Qwen3-TTS）",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

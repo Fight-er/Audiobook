@@ -1,0 +1,1 @@
+{"name":"audiobook-tests","private":true,"type":"module","dependencies":{"fake-indexeddb":"^6.2.8","jsdom":"^24.1.3"}}
