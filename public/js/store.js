@@ -67,6 +67,10 @@ export const store = {
     const s = await txStore(table, 'readwrite');
     return wait(s.delete(key));
   },
+  async allKeys(table) {
+    const st = await txStore(table);
+    return wait(st.getAllKeys());
+  },
   async all(table) {
     const s = await txStore(table);
     return wait(s.getAll());

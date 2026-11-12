@@ -3,18 +3,30 @@
  */
 
 import { api, ENGINES, LANGUAGES, createClient, fetchBackends, saveBackends } from './api.js';
-import { ensureRenditions, activeRendition, renditionById, chunkState, markChunk, isChunkDone, chapterDoneCount, migrateChunkStates } from './model.js';
+import { ensureRenditions, activeRendition, renditionById, defaultRenditionId, chunkState, markChunk, isChunkDone, chapterDoneCount, migrateChunkStates } from './model.js';
 import { store, newId } from './store.js';
 import { parseFile, parsePlainText, chunkBlocks, detectLanguage, extractNotes, looksLikeVerse } from './parser.js';
 import { Player } from './player.js';
 import { Generator } from './generator.js';
 import { exportChapterWav, exportBookWav, downloadBlob, safeFilename } from './export.js';
+import { createZip, readZipEntries, readZipEntry } from './zip.js';
 
-const APP_VERSION = '2026-11-12.13';
+const APP_VERSION = '2026-11-13.4';
 window.__APP_VERSION__ = APP_VERSION;
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+/** 本地服务端能力：是否支持 ffmpeg 转码压缩 */
+async function loadCapabilities() {
+  try {
+    const res = await fetch('/capabilities', { cache: 'no-store' });
+    if (res.ok) state.caps = await res.json();
+  } catch {
+    state.caps = { transcode: false };
+  }
+  return state.caps;
+}
 
 /** 当前音色版本 id */
 function ridNow() {
@@ -65,6 +77,7 @@ const state = {
   renditionId: null,
   backends: [],
   genQueue: [],
+  caps: { transcode: false },
   tocSelect: false,
   tocSelected: new Set(),
   settings: {
@@ -183,6 +196,26 @@ function applyTheme() {
   $('meta[name="theme-color"]')?.setAttribute('content', theme.bg);
 }
 
+function applyReadingMetrics() {
+  const root = document.documentElement;
+  root.style.setProperty('--reader-line-height', String(state.settings.lineHeight || 2.0));
+  root.style.setProperty('--reader-para-gap', String(state.settings.paraGap ?? 1.05) + 'em');
+}
+
+/** 自动夜间：19:00–07:00 用夜读主题，白天恢复用户选的主题 */
+function applyAutoNight() {
+  if (!state.settings.autoNight) {
+    applyTheme();
+    return;
+  }
+  const hour = new Date().getHours();
+  const night = hour >= 19 || hour < 7;
+  const id = night ? 'night' : (state.settings.theme || 'night');
+  document.documentElement.dataset.theme = id;
+  const theme = THEMES.find((t) => t.id === id) || THEMES[5];
+  $('meta[name="theme-color"]')?.setAttribute('content', theme.bg);
+}
+
 function applyFontSize() {
   document.documentElement.style.setProperty('--reader-size', `${state.settings.fontSize || 19}px`);
 }
@@ -272,6 +305,107 @@ function chapterStatus(ref) {
   return 'none';
 }
 
+let searchTimer = null;
+let tocSearchBar = null;
+let tocSearchBookId = null;
+
+/** 搜索条只在切换书籍时重建，输入时不会被打断 */
+function ensureTocSearch() {
+  if (tocSearchBar && tocSearchBookId === state.book?.id) return tocSearchBar;
+  tocSearchBookId = state.book?.id;
+  const input = el('input', {
+    class: 'input search-input',
+    placeholder: '搜索全文…（Esc 清除）',
+    value: state.searchQuery || '',
+    oninput: (e) => {
+      state.searchQuery = e.target.value;
+      state.searchResults = null;
+      if (tocSearchBar?._clear) tocSearchBar._clear.classList.toggle('hidden', !e.target.value);
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => runSearch(e.target.value), 260);
+    },
+    onkeydown: (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); clearSearch(); }
+    },
+  });
+  const clearBtn = el('button', {
+    class: 'search-clear',
+    title: '清除搜索（Esc）',
+    onclick: () => clearSearch(),
+  }, '✕');
+  tocSearchBar = el('div', { class: 'search-row' }, input, clearBtn);
+  tocSearchBar._input = input;
+  tocSearchBar._clear = clearBtn;
+  return tocSearchBar;
+}
+
+function clearSearch() {
+  state.searchQuery = '';
+  state.searchResults = null;
+  if (tocSearchBar?._input) tocSearchBar._input.value = '';
+  renderToc();
+}
+
+async function runSearch(query) {
+  const q = query.trim();
+  if (!q || !state.book) { renderToc(); return; }
+  const chapters = await store.chaptersOf(state.book.id);
+  const results = [];
+  for (const ch of chapters) {
+    for (let bi = 0; bi < ch.blocks.length && results.length < 120; bi++) {
+      const b = ch.blocks[bi];
+      if (b.type !== 'p' && b.type !== 'h') continue;
+      const at = b.text.indexOf(q);
+      if (at < 0) continue;
+      const chunkIndex = (ch.chunks || []).findIndex((c) => (c.segs || [{ b: c.b }]).some((s) => s.b === bi));
+      const from = Math.max(0, at - 18);
+      results.push({
+        chapterId: ch.id,
+        chapterTitle: ch.title,
+        chunkIndex: Math.max(0, chunkIndex),
+        before: b.text.slice(from, at),
+        hit: q,
+        after: b.text.slice(at + q.length, at + q.length + 40),
+      });
+      if (results.length >= 120) break;
+    }
+    if (results.length >= 120) break;
+  }
+  state.searchResults = { query: q, results };
+  renderSearchResults(results, q);
+}
+
+function renderSearchResults(results, query) {
+  const pane = $('.toc-list');
+  if (!pane) return;
+  pane.innerHTML = '';
+  pane.append(el('div', { class: 'toc-head' },
+    el('h2', {}, `搜索「${query}」`),
+    el('span', { class: 'hint' }, `${results.length} 条`),
+    el('button', { class: 'btn ghost sm', onclick: () => clearSearch() }, '返回目录')
+  ));
+  if (!results.length) {
+    pane.append(el('div', { class: 'muted', style: 'padding:14px;font-size:12.5px' }, '没有找到匹配的内容'));
+    return;
+  }
+  for (const r of results) {
+    pane.append(el('div', {
+      class: 'search-result',
+      onclick: async () => {
+        await openChapter(r.chapterId, { pause: true });
+        scrollToChunk(r.chunkIndex);
+      },
+    },
+      el('div', { class: 'sr-chapter' }, r.chapterTitle),
+      el('div', { class: 'sr-text' },
+        r.before,
+        el('mark', {}, r.hit),
+        r.after
+      )
+    ));
+  }
+}
+
 function renderToc() {
   const pane = $('#pane-toc');
   pane.innerHTML = '';
@@ -279,6 +413,25 @@ function renderToc() {
     pane.append(el('div', { class: 'muted', style: 'padding:8px;font-size:12.5px' }, '尚未打开书籍'));
     return;
   }
+
+  const bar = ensureTocSearch();
+  const input = bar._input;
+  if (input.value !== (state.searchQuery || '')) input.value = state.searchQuery || '';
+  bar._clear.classList.toggle('hidden', !state.searchQuery);
+  pane.append(bar);
+
+  const list = el('div', { class: 'toc-list' });
+  pane.append(list);
+
+  if (state.searchQuery && state.searchQuery.trim()) {
+    if (state.searchResults && state.searchResults.query === state.searchQuery.trim()) {
+      renderSearchResults(state.searchResults.results, state.searchQuery);
+    } else {
+      runSearch(state.searchQuery);
+    }
+    return;
+  }
+
   const selectMode = state.tocSelect;
   const selected = state.tocSelected;
   const pendingOf = (ref) => Math.max(0, (ref.total || 0) - (ref.done || 0));
@@ -304,12 +457,12 @@ function renderToc() {
       onclick: () => generateBook(),
     }, '整本生成')
   );
-  pane.append(head);
+  list.append(head);
 
   let lastPart = null;
   (state.book.chapterRefs || []).forEach((ref) => {
     if (ref.part && ref.part !== lastPart) {
-      pane.append(el('div', { class: 'toc-part' }, ref.part));
+      list.append(el('div', { class: 'toc-part' }, ref.part));
       lastPart = ref.part;
     } else if (!ref.part) {
       lastPart = null;
@@ -346,11 +499,11 @@ function renderToc() {
       el('span', { class: 'toc-pending' }, status === 'ready' ? '' : `${pendingOf(ref)}`),
       el('span', { class: `dot ${status}`, title: { ready: '已生成音频', partial: '部分生成', none: '尚未生成' }[status] })
     );
-    pane.append(row);
+    list.append(row);
   });
 
   if (selectMode) {
-    pane.append(el('div', { class: 'toc-select-bar' },
+    list.append(el('div', { class: 'toc-select-bar' },
       el('div', { class: 'tsb-info' },
         selected.size
           ? `已选 ${selected.size} 章 · ${selectedPending} 段待生成`
@@ -441,8 +594,11 @@ async function rechunkChapter(chapter) {
 
 /** 章节数据升级 / 重新分块 */
 async function ensureChunks(chapter, maxChars) {
+  // 老数据的 chunk.status 属于「默认音色」那个版本，不能跟着当前视图走
+  const legacyRid = defaultRenditionId(state.book) || ridNow();
+  if (legacyRid && migrateChunkStates(chapter, legacyRid)) store.put('chapters', chapter).catch(() => {});
+
   const rid0 = ridNow();
-  if (rid0 && migrateChunkStates(chapter, rid0)) store.put('chapters', chapter).catch(() => {});
 
   // 上次生成被中断（关页面/断网）会留下 generating/queued 状态，这里复位成待生成
   if (rid0) {
@@ -576,7 +732,7 @@ function renderReader() {
   const done = chapter.chunks.filter((c) => isChunkDone(c, ridNow())).length;
   const totalDur = state.chapterRows.reduce((a, r) => a + (r.dur || 0), 0);
   const chars = chapter.blocks.reduce((a, b) => a + b.text.length, 0);
-  const mismatch = chapterMismatchCount(chapter);
+  const issues = chapterAudioIssues(chapter);
 
   reader.append(el('div', { class: 'chapter-head' },
     el('div', { class: 'chapter-kicker' }, `${state.book?.title || ''} · 第 ${chapter.index + 1} 章`),
@@ -586,11 +742,15 @@ function renderReader() {
       el('span', { class: 'chip' }, `${chapter.chunks.length} 段`),
       el('span', { class: `chip ${done === chapter.chunks.length ? 'ok' : done > 0 ? 'warn' : ''}` }, `已配音 ${done}/${chapter.chunks.length}`),
       totalDur ? el('span', { class: 'chip' }, `时长 ${fmtTime(totalDur)}`) : null,
-      mismatch ? el('button', {
+      issues.total ? el('button', {
         class: 'chip action warn',
-        title: '这些段落是用别的音色 / 引擎生成的，点此重新生成本章',
-        onclick: () => regenerateChapter(chapter),
-      }, `${mismatch} 段音色不一致 · 重新生成`) : null,
+        title: issues.stale && !issues.mismatch
+          ? '这些段落用的音色档案在 Voicebox 里已经不存在了（可能是删除后重建）。如果还是同一个声音，更新标记即可'
+          : '这些段落是用别的音色 / 引擎生成的',
+        onclick: (e) => { e.stopPropagation(); openVoiceIssueMenu(chapter, e.currentTarget); },
+      }, issues.stale && !issues.mismatch
+        ? `${issues.stale} 段音色档案已失效 · 更新标记`
+        : `${issues.total} 段音色不一致 · 处理`) : null,
       chapter.staleChunks
         ? el('button', {
           class: 'chip action warn',
@@ -633,8 +793,9 @@ function renderReader() {
     } else {
       for (const { ci, seg } of segs) {
         const chunk = chapter.chunks[ci];
+        const hasMark = marksInChapter(chapter).some((m) => m.chunkIndex === ci);
         const span = el('span', {
-          class: 'chunk' + (isChunkDone(chunk, ridNow()) ? '' : ' pending-audio'),
+          class: 'chunk' + (isChunkDone(chunk, ridNow()) ? '' : ' pending-audio') + (hasMark ? ' marked' : ''),
           dataset: { i: String(ci) },
           title: isChunkDone(chunk, ridNow()) ? '点击从这里播放（右键更多操作）' : '这一段还没有音频（右键可单独生成）',
           onclick: () => onChunkClick(ci),
@@ -695,26 +856,69 @@ function renderNotes() {
   const body = $('#notes-body');
   if (!body) return;
   const notes = state.chapter?.notes || [];
+  const marks = marksInChapter(state.chapter);
   body.innerHTML = '';
-  $('#notes-count').textContent = notes.length ? `${notes.length}` : '0';
-  $('#btn-notes').disabled = !notes.length;
 
-  if (!notes.length) {
-    body.append(el('div', { class: 'notes-empty' }, '本章没有注释'));
+  const tab = state.notesTab || 'footnotes';
+  $('#notes-count').textContent = String(notes.length + marks.length);
+  $('#btn-notes').disabled = !notes.length && !marks.length;
+
+  if (!notes.length && !marks.length) {
+    body.append(el('div', { class: 'notes-empty' }, '本章没有注释或笔记'));
     setNotesOpen(false, { persist: false });
     return;
   }
 
-  for (const note of notes) {
-    body.append(el('div', {
-      class: 'note-item',
-      dataset: { n: String(note.n) },
-      title: '点击定位到正文位置',
-      onclick: () => focusRef(note.n),
-    },
-      el('span', { class: 'note-n' }, String(note.n)),
-      el('div', { class: 'note-text' }, note.text)
-    ));
+  body.append(el('div', { class: 'notes-tabs' },
+    el('button', {
+      class: 'notes-tab' + (tab === 'footnotes' ? ' active' : ''),
+      onclick: () => { state.notesTab = 'footnotes'; renderNotes(); },
+    }, `注释 ${notes.length}`),
+    el('button', {
+      class: 'notes-tab' + (tab === 'marks' ? ' active' : ''),
+      onclick: () => { state.notesTab = 'marks'; renderNotes(); },
+    }, `笔记 ${marks.length}`),
+  ));
+
+  if (tab === 'marks') {
+    if (!marks.length) {
+      body.append(el('div', { class: 'notes-empty' }, '还没有书签或批注\n在正文里右键一段即可添加'));
+    }
+    for (const m of marks) {
+      body.append(el('div', {
+        class: 'note-item mark-item',
+        title: '点击跳到正文位置',
+        onclick: () => jumpToMark(m),
+      },
+        el('span', { class: 'note-n' + (m.kind === 'note' ? ' is-note' : '') }, m.kind === 'note' ? '批' : '签'),
+        el('div', { class: 'note-text' },
+          el('div', { class: 'mark-excerpt' }, m.excerpt || ''),
+          m.note ? el('div', { class: 'mark-note' }, m.note) : null
+        ),
+        el('button', {
+          class: 'btn ghost sm mark-del',
+          title: '删除',
+          onclick: (e) => {
+            e.stopPropagation();
+            state.book.marks = marksOf(state.book).filter((x) => x.id !== m.id);
+            store.put('books', state.book).catch(() => {});
+            renderReader(); renderNotes();
+          },
+        }, '✕')
+      ));
+    }
+  } else {
+    for (const note of notes) {
+      body.append(el('div', {
+        class: 'note-item',
+        dataset: { n: String(note.n) },
+        title: '点击定位到正文位置',
+        onclick: () => focusRef(note.n),
+      },
+        el('span', { class: 'note-n' }, String(note.n)),
+        el('div', { class: 'note-text' }, note.text)
+      ));
+    }
   }
 
   if (state.settings.showNotes !== false) setNotesOpen(true, { persist: false });
@@ -755,6 +959,24 @@ function highlightNotesForChunk(chunkIndex) {
   }
 }
 
+function openVoiceIssueMenu(chapter, anchor) {
+  const issues = chapterAudioIssues(chapter);
+  const rect = anchor?.getBoundingClientRect?.();
+  const x = rect ? rect.left : 200;
+  const y = rect ? rect.bottom + 6 : 200;
+  showContextMenu(x, y, [
+    {
+      label: issues.stale && !issues.mismatch
+        ? `只更新标记（${issues.stale} 段，不重新合成）`
+        : '只更新标记（确认是同一个声音）',
+      action: () => retagChapterAudio(chapter),
+    },
+    '-',
+    { label: '重新生成本章', action: () => regenerateChapter(chapter) },
+    { label: '全书都更新标记', action: () => retagBookAudio() },
+  ]);
+}
+
 function openChunkMenu(x, y, ci) {
   const chapter = state.chapter;
   const chunk = chapter?.chunks?.[ci];
@@ -762,6 +984,9 @@ function openChunkMenu(x, y, ci) {
   const hasAudio = isChunkDone(chunk, ridNow());
   showContextMenu(x, y, [
     { label: '从这一段播放', action: () => onChunkClick(ci) },
+    '-',
+    { label: '添加书签', action: () => addMark('bookmark', ci) },
+    { label: '写批注…', action: () => addMark('note', ci) },
     '-',
     { label: hasAudio ? '重新生成这一段' : '生成这一段', action: () => regenerateChunk(ci) },
     { label: '从这一段开始补齐后续', action: () => generateFrom(ci) },
@@ -782,6 +1007,115 @@ async function generateFrom(startChunk) {
   if (!pending.size) { toast('这一段之后都已生成完毕'); return; }
   syncChapterRef(chapter);
   await queueOrRun([{ book: state.book, chapter, only: pending }], chapter.title);
+}
+
+/* ---------------- 书签与批注 ---------------- */
+
+function marksOf(book) {
+  if (!book) return [];
+  if (!Array.isArray(book.marks)) book.marks = [];
+  return book.marks;
+}
+
+function marksInChapter(chapter) {
+  return marksOf(state.book).filter((m) => m.chapterId === chapter?.id);
+}
+
+async function addMark(kind, chunkIndex) {
+  const chapter = state.chapter;
+  if (!chapter || !state.book) return;
+  const chunk = chapter.chunks[chunkIndex];
+  if (!chunk) return;
+
+  if (kind === 'bookmark') {
+    const exist = marksOf(state.book).find((m) => m.chapterId === chapter.id && m.chunkIndex === chunkIndex && m.kind === 'bookmark');
+    if (exist) { toast('这一段已经有书签了'); return; }
+    marksOf(state.book).push({
+      id: 'm' + Date.now().toString(36),
+      kind: 'bookmark',
+      chapterId: chapter.id,
+      chapterTitle: chapter.title,
+      chunkIndex,
+      excerpt: chunk.text.slice(0, 60),
+      createdAt: Date.now(),
+    });
+    await store.put('books', state.book).catch(() => {});
+    renderReader();
+    renderNotes();
+    toast('已添加书签', 'ok');
+    return;
+  }
+
+  openNoteDialog(chapter, chunkIndex);
+}
+
+function openNoteDialog(chapter, chunkIndex) {
+  const existing = marksOf(state.book).find(
+    (m) => m.chapterId === chapter.id && m.chunkIndex === chunkIndex && m.kind === 'note'
+  );
+  const textarea = el('textarea', { class: 'textarea', style: 'min-height:110px' }, existing?.note || '');
+  const modal = showModal({
+    title: existing ? '编辑批注' : '写批注',
+    body: el('div', { class: 'modal-body' },
+      el('div', { class: 'hint' }, chapter.chunks[chunkIndex]?.text.slice(0, 120) || ''),
+      el('div', { class: 'field' }, el('label', {}, '批注内容'), textarea),
+    ),
+    footer: [
+      existing ? el('button', {
+        class: 'btn danger',
+        onclick: async () => {
+          state.book.marks = marksOf(state.book).filter((m) => m.id !== existing.id);
+          await store.put('books', state.book).catch(() => {});
+          modal.close();
+          renderReader(); renderNotes();
+          toast('已删除批注');
+        },
+      }, '删除') : null,
+      el('div', { style: 'flex:1' }),
+      el('button', { class: 'btn', onclick: () => modal.close() }, '取消'),
+      el('button', {
+        class: 'btn primary',
+        onclick: async () => {
+          const note = textarea.value.trim();
+          if (!note) { toast('批注不能为空', 'err'); return; }
+          if (existing) existing.note = note;
+          else {
+            marksOf(state.book).push({
+              id: 'm' + Date.now().toString(36),
+              kind: 'note',
+              chapterId: chapter.id,
+              chapterTitle: chapter.title,
+              chunkIndex,
+              excerpt: chapter.chunks[chunkIndex].text.slice(0, 60),
+              note,
+              createdAt: Date.now(),
+            });
+          }
+          await store.put('books', state.book).catch(() => {});
+          modal.close();
+          renderReader(); renderNotes();
+          toast('已保存批注', 'ok');
+        },
+      }, '保存'),
+    ].filter(Boolean),
+  });
+}
+
+function jumpToMark(mark) {
+  if (!mark) return;
+  if (state.chapter?.id !== mark.chapterId) {
+    openChapter(mark.chapterId, { pause: true }).then(() => scrollToChunk(mark.chunkIndex));
+  } else {
+    scrollToChunk(mark.chunkIndex);
+  }
+}
+
+function scrollToChunk(chunkIndex) {
+  const node = $(`.chunk[data-i="${chunkIndex}"]`);
+  if (!node) return;
+  node.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  node.classList.add('flash');
+  setTimeout(() => node.classList.remove('flash'), 1400);
 }
 
 function onChunkClick(i) {
@@ -830,6 +1164,11 @@ function highlightChunk(chunkIndex) {
 async function openBook(book, opts = {}) {
   const full = await store.getBook(book.id);
   if (!full) return;
+  if (tocSearchBookId !== full.id) {
+    state.searchQuery = '';
+    state.searchResults = null;
+    tocSearchBar = null;
+  }
   state.book = full;
   state.book.chapterRefs = full.chapterRefs || [];
 
@@ -857,6 +1196,11 @@ async function openBook(book, opts = {}) {
 async function openChapter(chapterId, opts = {}) {
   const chapter = await store.getChapter(chapterId);
   if (!chapter) return;
+
+  // 旧版本生成的音频 key 是「章节:段号」，没有版本信息 —— 统一认领到默认音色版本
+  const baseRid = defaultRenditionId(state.book);
+  if (baseRid) await store.adoptLegacyAudio(chapter.id, baseRid).catch(() => {});
+
   await ensureChunks(chapter, state.settings.maxChars);
   state.chapter = chapter;
   state.chapterRows = await store.audioOfRendition(chapter.id, ridNow());
@@ -1052,21 +1396,85 @@ function voiceKey(s = {}) {
   return [s.profileId || '', s.engine || '', s.modelSize || '', s.language || ''].join('|');
 }
 
-function chapterMismatchCount(chapter) {
+/**
+ * 统计本章音频与当前音色版本的差异，分成两类：
+ *   mismatch — 两个音色档案现在都存在，但音频不是这个档案生成的（确实换了声音）
+ *   stale    — 音频用的档案已经被删除（Voicebox 里删了重建，id 变了，但很可能是同一个声音）
+ */
+function chapterAudioIssues(chapter) {
   const cur = voiceOfRendition(null);
   const rid = ridNow();
-  return (chapter?.chunks || []).filter((c) => {
-    if (!isChunkDone(c, rid)) return false;
+  const knownIds = new Set((state.profiles || []).map((p) => p.id));
+  let mismatch = 0;
+  let stale = 0;
+
+  for (const c of chapter?.chunks || []) {
+    if (!isChunkDone(c, rid)) continue;
     const meta = chunkState(c, rid).meta;
-    if (!meta) return false;
-    if ((meta.profileId || '') !== (cur.profileId || '')) return true;
-    if ((meta.engine || '') !== (cur.engine || '')) return true;
-    if ((meta.modelSize || '') !== (cur.modelSize || '')) return true;
-    const a = meta.language || 'auto';
-    const b = cur.language || 'auto';
-    if (a === 'auto' || b === 'auto') return false;   // 「自动检测」不参与比较
-    return a !== b;
-  }).length;
+    if (!meta) continue;
+
+    const sameProfile = (meta.profileId || '') === (cur.profileId || '');
+    if (!sameProfile) {
+      if (meta.profileId && !knownIds.has(meta.profileId)) stale++;
+      else mismatch++;
+      continue;
+    }
+    if ((meta.engine || '') !== (cur.engine || '')) { mismatch++; continue; }
+    if ((meta.modelSize || '') !== (cur.modelSize || '')) { mismatch++; continue; }
+    const la = meta.language || 'auto';
+    const lb = cur.language || 'auto';
+    if (la === 'auto' || lb === 'auto') continue;
+    if (la !== lb) mismatch++;
+  }
+  return { mismatch, stale, total: mismatch + stale };
+}
+
+function chapterMismatchCount(chapter) {
+  return chapterAudioIssues(chapter).total;
+}
+
+/** 只把音频的「音色标记」改成当前版本，不重新合成 */
+async function retagChapterAudio(chapter, { silent = false } = {}) {
+  if (!chapter) return 0;
+  const cur = voiceOfRendition(null);
+  const rid = ridNow();
+  let n = 0;
+  for (const c of chapter.chunks || []) {
+    const st = c.audio?.[rid];
+    if (!st || st.status !== 'done' || !st.meta) continue;
+    st.meta = {
+      ...st.meta,
+      profileId: cur.profileId,
+      engine: cur.engine,
+      modelSize: cur.modelSize,
+      language: cur.language,
+      retaggedAt: Date.now(),
+    };
+    n++;
+  }
+  if (n) {
+    chapter.updatedAt = Date.now();
+    await store.put('chapters', chapter).catch(() => {});
+  }
+  if (!silent) {
+    if (state.chapter?.id === chapter.id) { renderReader(); }
+    toast(n ? `已更新 ${n} 段的音色标记` : '没有需要更新的段落', n ? 'ok' : '');
+  }
+  return n;
+}
+
+/** 整本书的音色标记都对齐到当前版本 */
+async function retagBookAudio() {
+  if (!state.book) return;
+  const chapters = await store.chaptersOf(state.book.id);
+  let total = 0;
+  for (const ch of chapters) total += await retagChapterAudio(ch, { silent: true });
+  if (state.chapter) {
+    const fresh = await store.getChapter(state.chapter.id);
+    if (fresh) { state.chapter = fresh; renderReader(); }
+  }
+  renderToc();
+  toast(total ? `全书已更新 ${total} 段的音色标记` : '没有需要更新的段落', total ? 'ok' : '');
 }
 
 function resetChunk(chunk, rid = ridNow()) {
@@ -1248,6 +1656,7 @@ async function runGeneration(targets, title) {
       ...state.settings,
       ...voice,
       renditionId: rendition?.id || ridNow(),
+      compress: !!state.caps.transcode && state.settings.compressAudio !== false,
       backends: backends.map((b) => ({ id: b.id, label: b.label, base: b.base, url: b.url, profileId: b.profileId, profileName: b.profileName })),
     });
     if (res?.skipped) {
@@ -1715,6 +2124,206 @@ function openImportModal() {
 /* 设置里的「语音服务节点」                                            */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* 数据备份与迁移                                                      */
+/* ------------------------------------------------------------------ */
+
+async function exportLibrary() {
+  const books = await store.all('books');
+  if (!books.length) { toast('书库是空的'); return; }
+  const chapters = await store.all('chapters');
+  const audioRows = await store.all('audio');
+
+  const totalBytes = audioRows.reduce((n, r) => n + (r.size || r.blob?.size || 0), 0);
+  const ok = await confirmDialog({
+    title: '导出书库备份',
+    message: `将打包 ${books.length} 本书、${chapters.length} 章、${audioRows.length} 段音频（约 ${fmtBytes(totalBytes)}）。\n\n备份包含书籍文字、笔记、进度和全部音频，可在别的电脑/浏览器导入。`,
+    confirmText: '开始导出',
+  });
+  if (!ok) return;
+
+  const manifest = {
+    app: 'audiobook-reader',
+    version: 1,
+    exportedAt: Date.now(),
+    books,
+    chapters,
+    audio: audioRows.map((row, i) => ({
+      key: row.key,
+      chapterId: row.chapterId,
+      bookId: row.bookId,
+      renditionId: row.renditionId || null,
+      index: row.index,
+      mime: row.mime || 'audio/wav',
+      dur: row.dur || 0,
+      file: `audio/${String(i).padStart(5, '0')}.bin`,
+    })),
+  };
+
+  const entries = [
+    { name: 'manifest.json', data: new TextEncoder().encode(JSON.stringify(manifest)) },
+    ...audioRows.map((row, i) => ({ name: manifest.audio[i].file, data: row.blob })),
+  ];
+
+  toast('正在打包…');
+  const zip = await createZip(entries, {
+    onProgress: (done, total) => {
+      const btn = document.getElementById('btn-export-library');
+      if (btn) btn.textContent = `打包中 ${Math.round((done / total) * 100)}%`;
+    },
+  });
+  const stamp = new Date().toISOString().slice(0, 10);
+  downloadBlob(zip, `有声书备份-${stamp}.zip`);
+  const btn = document.getElementById('btn-export-library');
+  if (btn) btn.textContent = '导出备份';
+  toast(`备份已导出（${fmtBytes(zip.size)}）`, 'ok');
+}
+
+let compressAudioRunning = false;
+
+/** 把已经存在的 WAV 音频批量转成 Opus（体积约为原来的 1/10） */
+async function compressExistingAudio() {
+  if (compressAudioRunning) {
+    compressAudioRunning = false;
+    toast('正在停止压缩…');
+    return;
+  }
+  if (!state.caps?.transcode) {
+    toast('服务端没有可用的 ffmpeg，无法压缩', 'err');
+    return;
+  }
+  const keys = await store.allKeys('audio');
+  if (!keys.length) { toast('还没有生成过音频'); return; }
+
+  const isCompressed = (r) => /webm|opus|ogg/i.test(r?.mime || '');
+  let candidates = 0;
+  let totalBytes = 0;
+  for (let i = 0; i < keys.length; i += 20) {
+    const rows = await Promise.all(keys.slice(i, i + 20).map((k) => store.get('audio', k)));
+    for (const r of rows) {
+      if (!r?.blob || isCompressed(r)) continue;
+      candidates++;
+      totalBytes += r.blob.size;
+    }
+  }
+  if (!candidates) { toast('所有音频都已经是压缩格式'); return; }
+
+  const ok = await confirmDialog({
+    title: '压缩已有音频',
+    message: `有 ${candidates} 段音频（约 ${fmtBytes(totalBytes)}）还是 WAV 格式。\n\n将逐段转成 Opus，预计能省下 80%~90% 的空间。\n过程中可以随时点「停止压缩」，已完成的不会回滚。`,
+    confirmText: '开始压缩',
+  });
+  if (!ok) return;
+
+  compressAudioRunning = true;
+  const btn = document.getElementById('btn-compress-audio');
+  if (btn) btn.textContent = '停止压缩';
+  let done = 0;
+  let savedCount = 0;
+  let failed = 0;
+  let before = 0;
+  let after = 0;
+
+  outer:
+  for (let i = 0; i < keys.length; i += 5) {
+    const rows = await Promise.all(keys.slice(i, i + 5).map((k) => store.get('audio', k)));
+    for (const row of rows) {
+      if (!compressAudioRunning) break outer;
+      if (!row?.blob || isCompressed(row)) continue;
+      done++;
+      const hint = document.getElementById('compress-hint');
+      if (hint) hint.textContent = `压缩中 ${done}/${candidates}…`;
+      try {
+        const res = await fetch('/transcode', {
+          method: 'POST',
+          headers: { 'content-type': 'audio/wav' },
+          body: row.blob,
+        });
+        if (!res.ok) { failed++; continue; }
+        const out = await res.blob();
+        if (!out.size || out.size >= row.blob.size * 0.9) { failed++; continue; }
+        const mime = 'audio/webm';
+        await store.put('audio', {
+          ...row,
+          blob: new Blob([out], { type: mime }),
+          mime,
+          size: out.size,
+          compressedAt: Date.now(),
+        });
+        before += row.blob.size;
+        after += out.size;
+        savedCount++;
+      } catch {
+        failed++;
+      }
+    }
+  }
+
+  compressAudioRunning = false;
+  if (btn) btn.textContent = '压缩已有音频';
+  const hint = document.getElementById('compress-hint');
+  if (hint) {
+    hint.textContent = savedCount
+      ? `已压缩 ${savedCount} 段：${fmtBytes(before)} → ${fmtBytes(after)}${failed ? `（${failed} 段跳过）` : ''}`
+      : '没有可压缩的音频';
+  }
+  toast(savedCount
+    ? `压缩完成：${fmtBytes(before)} → ${fmtBytes(after)}`
+    : '没有可压缩的音频', savedCount ? 'ok' : '');
+}
+
+async function importLibrary(file) {
+  if (!file) return;
+  const ok = await confirmDialog({
+    title: '导入书库备份',
+    message: '备份里同 ID 的书籍会覆盖当前已有的同名书（其余书不受影响）。\n导入期间请不要关闭页面。',
+    confirmText: '开始导入',
+  });
+  if (!ok) return;
+
+  try {
+    const buf = await file.arrayBuffer();
+    const zip = readZipEntries(buf);
+    const mEntry = zip.entries.get('manifest.json');
+    if (!mEntry) throw new Error('不是本应用的备份（缺少 manifest.json）');
+    const manifest = JSON.parse(new TextDecoder().decode(await readZipEntry(zip, mEntry)));
+    if (manifest.app !== 'audiobook-reader') throw new Error('备份格式不匹配');
+
+    for (const book of manifest.books || []) {
+      if (await store.getBook(book.id)) await store.deleteBook(book.id);
+      await store.put('books', book);
+    }
+    for (const ch of manifest.chapters || []) await store.put('chapters', ch);
+
+    let restored = 0;
+    for (const item of manifest.audio || []) {
+      const entry = zip.entries.get(item.file);
+      if (!entry) continue;
+      const bytes = await readZipEntry(zip, entry);
+      await store.put('audio', {
+        key: item.key,
+        chapterId: item.chapterId,
+        bookId: item.bookId,
+        renditionId: item.renditionId || undefined,
+        index: item.index,
+        blob: new Blob([bytes], { type: item.mime || 'audio/wav' }),
+        mime: item.mime || 'audio/wav',
+        dur: item.dur || 0,
+        size: bytes.length,
+        createdAt: Date.now(),
+      });
+      restored++;
+    }
+
+    state.books = await store.listBooks();
+    renderLibrary();
+    renderToc();
+    toast(`已导入 ${(manifest.books || []).length} 本书、${restored} 段音频`, 'ok');
+  } catch (err) {
+    toast('导入失败：' + err.message, 'err');
+  }
+}
+
 function renderBackendsEditor() {
   const wrap = el('div', { class: 'backend-list' });
   const urlInput = el('input', { class: 'input', placeholder: 'http://192.168.18.33:17493', style: 'flex:1;min-width:0' });
@@ -1806,14 +2415,17 @@ function renderBackendsEditor() {
 }
 
 function openSettingsModal() {
+  // 有书打开时，这里的音色设置编辑的是「当前音色版本」；没有书时作为新书默认值
+  const curRendition = activeRendition(state.book);
+  const voice = voiceOfRendition(curRendition);
   const profileOptions = state.profiles.length
-    ? state.profiles.map((p) => el('option', { value: p.id, selected: p.id === state.settings.profileId }, `${p.name}${p.language ? ' · ' + p.language : ''}`))
+    ? state.profiles.map((p) => el('option', { value: p.id, selected: p.id === voice.profileId }, `${p.name}${p.language ? ' · ' + p.language : ''}`))
     : [el('option', { value: '' }, '（语音服务未连接）')];
 
-  const engineOptions = ENGINES.map((e) => el('option', { value: e.id, selected: e.id === state.settings.engine }, e.label));
-  const sizeOptions = (ENGINES.find((e) => e.id === state.settings.engine)?.sizes || ['1.7B']).map(
-    (s) => el('option', { value: s, selected: s === state.settings.modelSize }, s));
-  const langOptions = LANGUAGES.map(([v, label]) => el('option', { value: v, selected: v === state.settings.language }, v === 'auto' ? '自动检测' : label));
+  const engineOptions = ENGINES.map((e) => el('option', { value: e.id, selected: e.id === voice.engine }, e.label));
+  const sizeOptions = (ENGINES.find((e) => e.id === voice.engine)?.sizes || ['1.7B']).map(
+    (s) => el('option', { value: s, selected: s === voice.modelSize }, s));
+  const langOptions = LANGUAGES.map(([v, label]) => el('option', { value: v, selected: v === voice.language }, v === 'auto' ? '自动检测' : label));
 
   const engineSelect = el('select', { class: 'select' }, ...engineOptions);
   const sizeSelect = el('select', { class: 'select' }, ...sizeOptions);
@@ -1822,6 +2434,20 @@ function openSettingsModal() {
   const maxCharsInput = el('input', { class: 'input', type: 'number', min: '100', max: '800', step: '10', value: String(state.settings.maxChars) });
   const instructInput = el('input', { class: 'input', value: state.settings.instruct || '', placeholder: '例如：用温柔低沉的旁白语气朗读（可留空）' });
   const fontInput = el('input', { type: 'range', min: '15', max: '26', step: '1', value: String(state.settings.fontSize) });
+  const compressInput = el('input', { type: 'checkbox', checked: state.settings.compressAudio !== false });
+  const autoNightInput = el('input', { type: 'checkbox', checked: !!state.settings.autoNight });
+  const lineHeightInput = el('input', { type: 'range', min: '1.4', max: '2.8', step: '0.1', value: String(state.settings.lineHeight || 2.0), style: 'flex:1;min-width:0' });
+  const lineHeightLabel = el('span', { class: 'hint', style: 'min-width:38px;text-align:right' }, String(state.settings.lineHeight || 2.0));
+  lineHeightInput.oninput = () => {
+    lineHeightLabel.textContent = lineHeightInput.value;
+    document.documentElement.style.setProperty('--reader-line-height', lineHeightInput.value);
+  };
+  const paraGapInput = el('input', { type: 'range', min: '0.2', max: '2', step: '0.1', value: String(state.settings.paraGap ?? 1.05), style: 'flex:1;min-width:0' });
+  const paraGapLabel = el('span', { class: 'hint', style: 'min-width:38px;text-align:right' }, String(state.settings.paraGap ?? 1.05));
+  paraGapInput.oninput = () => {
+    paraGapLabel.textContent = paraGapInput.value;
+    document.documentElement.style.setProperty('--reader-para-gap', `${paraGapInput.value}em`);
+  };
   const followHighlightInput = el('input', { type: 'checkbox', checked: state.settings.highlightFollow !== false });
   const autoScrollInput = el('input', { type: 'checkbox', checked: state.settings.autoScroll !== false });
   const followPosInput = el('input', { type: 'range', min: '30', max: '90', step: '5', value: String(state.settings.followPosition ?? 80), style: 'flex:1;min-width:0' });
@@ -1865,11 +2491,13 @@ function openSettingsModal() {
   });
 
   let saved = false;
-  const voiceBefore = voiceKey(state.settings);
+  const voiceBefore = { ...voiceOfRendition(activeRendition(state.book)) };
   const body = el('div', { class: 'modal-body' },
     el('div', { class: 'row' },
-      el('div', { class: 'field' }, el('label', {}, '音色（Voicebox 语音档案）'), profileSelect,
-        el('div', { class: 'hint' }, state.profiles.length ? `共 ${state.profiles.length} 个音色可用` : '请先启动 Voicebox 桌面应用')),
+      el('div', { class: 'field' }, el('label', {}, curRendition ? `音色（当前版本：${curRendition.name}）` : '音色（新书默认）'), profileSelect,
+        el('div', { class: 'hint' }, curRendition
+          ? '这里的改动会写进当前音色版本；想保留旧版本请先用顶栏「音色 → 新建版本」'
+          : (state.profiles.length ? `共 ${state.profiles.length} 个音色可用` : '请先启动 Voicebox 桌面应用'))),
       el('div', { class: 'field' }, el('label', {}, '朗读语言'), langSelect,
         el('div', { class: 'hint' }, '「自动检测」会按章节文本判断中/英文')),
     ),
@@ -1887,6 +2515,29 @@ function openSettingsModal() {
     el('div', { class: 'field' }, el('label', {}, '阅读主题'), themeGrid),
     el('div', { class: 'field' }, el('label', {}, '正文字号'), fontInput,
       el('div', { class: 'hint' }, '拖动后立即生效，保存后会记住')),
+    el('div', { class: 'field' }, el('label', {}, '行距与段距'),
+      el('div', { class: 'range-row' },
+        el('span', { class: 'hint', style: 'white-space:nowrap' }, '行距'),
+        lineHeightInput,
+        lineHeightLabel,
+      ),
+      el('div', { class: 'range-row' },
+        el('span', { class: 'hint', style: 'white-space:nowrap' }, '段距'),
+        paraGapInput,
+        paraGapLabel,
+      ),
+    ),
+    el('div', { class: 'field' }, el('label', {}, '夜间'),
+      el('div', { class: 'switch-row' },
+        el('label', {}, autoNightInput, el('span', {}, '19:00–07:00 自动切换夜读主题')),
+      )),
+    el('div', { class: 'field' }, el('label', {}, '存储'),
+      el('div', { class: 'switch-row' },
+        el('label', {}, compressInput, el('span', {}, '压缩音频（Opus）')),
+      ),
+      el('div', { class: 'hint' }, state.caps?.transcode
+        ? '每段音频存盘前用 ffmpeg 转 Opus，体积约为 WAV 的 1/10；对已有音频不影响'
+        : '当前不可用：服务端没找到 ffmpeg，音频会以 WAV 保存')),
     el('div', { class: 'field' }, el('label', {}, '跟随朗读'),
       el('div', { class: 'switch-row' },
         el('label', {}, followHighlightInput, el('span', {}, '高亮当前段落')),
@@ -1898,7 +2549,20 @@ function openSettingsModal() {
         followPosLabel,
       ),
       el('div', { class: 'hint' }, '关掉「高亮」就只朗读、不标记；关掉「自动滚动」则完全由你自己滚动页面')),
-    el('div', { class: 'hint', style: 'border-top:1px solid var(--border-soft);padding-top:12px' }, usage),
+    el('div', { class: 'field', style: 'border-top:1px solid var(--border-soft);padding-top:12px' },
+      el('label', {}, '数据'),
+      el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' },
+        el('button', { class: 'btn sm', id: 'btn-export-library', onclick: () => exportLibrary() }, '导出备份'),
+        el('button', { class: 'btn sm', onclick: () => document.getElementById('import-file').click() }, '导入备份'),
+        el('button', { class: 'btn sm', id: 'btn-compress-audio', onclick: () => compressExistingAudio() }, '压缩已有音频'),
+      ),
+      el('div', { class: 'hint', id: 'compress-hint' },
+        state.caps?.transcode
+          ? '「压缩已有音频」会把以前保存的 WAV 逐段转成 Opus，旧书也能瘦身'
+          : '压缩需要服务端有 ffmpeg；当前不可用'),
+      el('div', { class: 'hint' }, '备份是一个 zip（书籍 + 笔记 + 进度 + 全部音频），可用于换电脑或换浏览器'),
+    ),
+    el('div', { class: 'hint' }, usage),
   );
 
   const modal = showModal({
@@ -1932,29 +2596,42 @@ function openSettingsModal() {
       el('button', {
         class: 'btn primary',
         onclick: async () => {
-          state.settings.profileId = profileSelect.value;
-          state.settings.engine = engineSelect.value;
-          state.settings.modelSize = sizeSelect.value === '' ? state.settings.modelSize : sizeSelect.value;
-          state.settings.language = langSelect.value;
+          const newVoice = {
+            profileId: profileSelect.value,
+            engine: engineSelect.value,
+            modelSize: sizeSelect.value === '' ? voice.modelSize : sizeSelect.value,
+            language: langSelect.value,
+          };
+          if (curRendition) {
+            Object.assign(curRendition, newVoice);
+            await store.put('books', state.book).catch(() => {});
+            renderRenditionButton();
+            renderTopbar();
+          }
+          Object.assign(state.settings, newVoice);
           state.settings.maxChars = Math.max(100, Math.min(800, Number(maxCharsInput.value) || 220));
           state.settings.instruct = instructInput.value.trim();
           state.settings.theme = pendingTheme;
           state.settings.fontSize = Number(fontInput.value) || 19;
+          state.settings.compressAudio = compressInput.checked;
+          state.settings.autoNight = autoNightInput.checked;
+          state.settings.lineHeight = Number(lineHeightInput.value) || 2.0;
+          state.settings.paraGap = Number(paraGapInput.value) || 1.05;
           state.settings.highlightFollow = followHighlightInput.checked;
           state.settings.autoScroll = autoScrollInput.checked;
           state.settings.followPosition = Number(followPosInput.value) || 80;
           saved = true;
           await saveSettings();
-          applyTheme(); applyFontSize(); renderTopbar();
+          applyTheme(); applyAutoNight(); applyFontSize(); applyReadingMetrics(); renderTopbar();
           if (state.chapter) { state.chapterRows = await store.audioOfRendition(state.chapter.id, ridNow()); renderReader(); }
           modal.close();
           toast('设置已保存', 'ok');
-          if (voiceKey(state.settings) !== voiceBefore) {
+          if (curRendition && JSON.stringify(newVoice) !== JSON.stringify(voiceBefore)) {
             const changed = state.chapter ? chapterMismatchCount(state.chapter) : 0;
             if (changed) {
-              toast(`音色/引擎已变更，本章有 ${changed} 段仍是旧参数生成，可在「⋯ → 重新生成本章」更新`, 'err');
+              toast(`「${curRendition.name}」的音色已更新，本章有 ${changed} 段还是旧参数生成的，可点章节头的提示重新生成`, 'err');
             } else {
-              toast('音色/引擎已变更，下次生成的段落会使用新设置');
+              toast(`已更新音色版本「${curRendition.name}」`);
             }
           }
         },
@@ -2244,6 +2921,9 @@ function openRenditionMenu(x, y) {
     action: () => switchRendition(r.id),
   }));
   items.push('-');
+  items.push({ label: '✎ 编辑当前版本…', action: () => openRenditionDialog(activeRendition(state.book)) });
+  items.push({ label: '⟳ 以当前音色重标记本章', action: () => retagChapterAudio(state.chapter) });
+  items.push({ label: '⟳ 以当前音色重标记全书', action: () => retagBookAudio() });
   items.push({ label: '＋ 新建音色版本…', action: () => openRenditionDialog() });
   if (renditions.length > 1) {
     items.push({ label: '删除当前版本…', danger: true, action: () => deleteRendition() });
@@ -2257,18 +2937,23 @@ function profileShort(id) {
 }
 
 /** 新建音色版本 */
-function openRenditionDialog() {
-  const nameInput = el('input', { class: 'input', value: `版本 ${(state.book.renditions || []).length + 1}` });
+function openRenditionDialog(existing = null) {
+  const isEdit = !!existing;
+  const base = existing || voiceOfRendition(null);
+  const nameInput = el('input', {
+    class: 'input',
+    value: existing ? existing.name : `版本 ${(state.book.renditions || []).length + 1}`,
+  });
   const profileSelect = el('select', { class: 'select' },
     ...(state.profiles.length
-      ? state.profiles.map((p) => el('option', { value: p.id, selected: p.id === state.settings.profileId }, `${p.name}${p.language ? ' · ' + p.language : ''}`))
+      ? state.profiles.map((p) => el('option', { value: p.id, selected: p.id === base.profileId }, `${p.name}${p.language ? ' · ' + p.language : ''}`))
       : [el('option', { value: '' }, '（语音服务未连接）')]));
   const engineSelect = el('select', { class: 'select' },
-    ...ENGINES.map((e) => el('option', { value: e.id, selected: e.id === state.settings.engine }, e.label)));
+    ...ENGINES.map((e) => el('option', { value: e.id, selected: e.id === base.engine }, e.label)));
   const sizeSelect = el('select', { class: 'select' },
-    ...((ENGINES.find((e) => e.id === state.settings.engine)?.sizes) || ['1.7B']).map((s) => el('option', { value: s, selected: s === state.settings.modelSize }, s)));
+    ...((ENGINES.find((e) => e.id === base.engine)?.sizes) || ['1.7B']).map((s) => el('option', { value: s, selected: s === base.modelSize }, s)));
   const langSelect = el('select', { class: 'select' },
-    ...LANGUAGES.map(([v, label]) => el('option', { value: v, selected: v === state.settings.language }, v === 'auto' ? '自动检测' : label)));
+    ...LANGUAGES.map(([v, label]) => el('option', { value: v, selected: v === base.language }, v === 'auto' ? '自动检测' : label)));
 
   engineSelect.onchange = () => {
     const sizes = ENGINES.find((e) => e.id === engineSelect.value)?.sizes || [];
@@ -2278,7 +2963,7 @@ function openRenditionDialog() {
   };
 
   const modal = showModal({
-    title: '新建音色版本',
+    title: isEdit ? '编辑音色版本' : '新建音色版本',
     body: el('div', { class: 'modal-body' },
       el('div', { class: 'field' }, el('label', {}, '版本名称'),
         nameInput,
@@ -2298,6 +2983,30 @@ function openRenditionDialog() {
         class: 'btn primary',
         onclick: async () => {
           const name = nameInput.value.trim() || `版本 ${(state.book.renditions || []).length + 1}`;
+          if (isEdit) {
+            Object.assign(existing, {
+              name,
+              profileId: profileSelect.value,
+              engine: engineSelect.value,
+              modelSize: sizeSelect.value || existing.modelSize,
+              language: langSelect.value,
+            });
+            await store.put('books', state.book).catch(() => {});
+            renderRenditionButton();
+            renderTopbar();
+            modal.close();
+            const stale = state.chapter ? chapterMismatchCount(state.chapter) : 0;
+            const issues = state.chapter ? chapterAudioIssues(state.chapter) : { mismatch: 0, stale: 0 };
+            if (issues.stale && !issues.mismatch) {
+              toast(`已更新「${name}」；本章有 ${issues.stale} 段用的是已失效的旧档案，若还是同一个声音，点章节头提示选「只更新标记」即可`);
+            } else if (issues.mismatch) {
+              toast(`已更新「${name}」；本章有 ${issues.mismatch} 段是别的音色生成的，需要的话请重新生成`, 'err');
+            } else {
+              toast(`已更新音色版本「${name}」`, 'ok');
+            }
+            if (state.chapter) renderReader();
+            return;
+          }
           const rid = `${state.book.id}_r${Date.now().toString(36)}`;
           state.book.renditions = state.book.renditions || [];
           state.book.renditions.push({
@@ -2465,6 +3174,11 @@ function wireGlobal() {
     toast('正在停止…');
   };
   q('#gen-queue-clear').onclick = () => clearGenQueue();
+  q('#import-file').onchange = async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (f) await importLibrary(f);
+  };
   q('#gen-collapse').onclick = () => { q('#gen-panel').classList.add('hidden'); updateGenPill(); };
   q('#gen-pill').onclick = () => { q('#gen-panel').classList.remove('hidden'); updateGenPill('', false); };
 
@@ -2550,7 +3264,9 @@ async function boot() {
   const saved = await store.kvGet('settings', null);
   if (saved) Object.assign(state.settings, saved);
   applyTheme();
+  applyAutoNight();
   applyFontSize();
+  applyReadingMetrics();
   $('#pb-speed').value = String(state.settings.rate || 1);
   player.setRate(state.settings.rate || 1);
   $('#pb-autonext').style.color = state.settings.autoNext ? 'var(--accent)' : '';
@@ -2565,6 +3281,7 @@ async function boot() {
   wireGlobal();
 
   // 先连服务：即使后面恢复进度出错，状态栏也不会一直停在「检测中」
+  await loadCapabilities();
   await refreshBackends().catch(() => {});
   await refreshHealth({ silent: true }).catch(() => {});
   loadProfiles().catch(() => {});

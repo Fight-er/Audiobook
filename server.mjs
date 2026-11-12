@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -29,6 +30,49 @@ const VOICEBOX_URL = (process.env.VOICEBOX_URL || 'http://127.0.0.1:17493').repl
  *   set VOICEBOX_EXTRA=http://192.168.18.33:17493
  */
 const CONFIG_FILE = path.join(ROOT, 'backends.json');
+const TRANSCODE_DIR = path.join(ROOT, '.cache', 'transcode');
+
+/**
+ * 找 ffmpeg：优先 FFMPEG_PATH，其次扫 PATH（不用 spawn 查，沙盒下管道会被拒）
+ */
+function findFfmpeg() {
+  const explicit = process.env.FFMPEG_PATH;
+  if (explicit && fs.existsSync(explicit)) return explicit;
+  const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  for (const dir of dirs) {
+    for (const name of ['ffmpeg.exe', 'ffmpeg']) {
+      const candidate = path.join(dir, name);
+      try { if (fs.existsSync(candidate)) return candidate; } catch { /* ignore */ }
+    }
+  }
+  for (const c of [path.join(ROOT, 'bin', 'ffmpeg.exe'), 'C:\\ffmpeg\\bin\\ffmpeg.exe']) {
+    try { if (fs.existsSync(c)) return c; } catch { /* ignore */ }
+  }
+  return null;
+}
+
+const FFMPEG = findFfmpeg();
+
+/** 用 ffmpeg 把 WAV 转成 Opus（WebM 容器），不占用管道 */
+function transcodeToOpus(inputPath, outputPath, bitrateKbps = 24) {
+  return new Promise((resolve, reject) => {
+    if (!FFMPEG) { reject(new Error('未找到 ffmpeg')); return; }
+    const args = [
+      '-y', '-hide_banner', '-loglevel', 'error',
+      '-i', inputPath,
+      '-c:a', 'libopus', '-b:a', `${bitrateKbps}k`, '-ac', '1', '-ar', '24000',
+      '-f', 'webm', outputPath,
+    ];
+    const child = spawn(FFMPEG, args, { stdio: 'ignore', windowsHide: true });
+    const timer = setTimeout(() => { try { child.kill(); } catch { /* noop */ } reject(new Error('转码超时')); }, 120000);
+    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error('ffmpeg 退出码 ' + code));
+    });
+  });
+}
 
 function defaultBackends() {
   const list = [{ id: 'local', label: '本机', url: VOICEBOX_URL }];
@@ -247,6 +291,68 @@ const server = http.createServer(async (req, res) => {
       await handleProxy(req, res, url);
       return;
     }
+    if (url.pathname === '/capabilities') {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({
+        transcode: !!FFMPEG,
+        codec: 'opus',
+        container: 'webm',
+        bitrate: 24,
+        backends: BACKENDS.length,
+      }));
+      return;
+    }
+
+    if (url.pathname === '/transcode' && req.method === 'POST') {
+      if (!FFMPEG) {
+        res.writeHead(503, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ detail: '服务端没有可用的 ffmpeg，无法压缩' }));
+        return;
+      }
+      const chunks = [];
+      let size = 0;
+      for await (const c of req) {
+        size += c.length;
+        if (size > 40 * 1024 * 1024) {
+          res.writeHead(413, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ detail: '音频块过大' }));
+          return;
+        }
+        chunks.push(c);
+      }
+      const body = Buffer.concat(chunks);
+      if (!body.length) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ detail: '空请求体' }));
+        return;
+      }
+      const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const inPath = path.join(TRANSCODE_DIR, id + '.wav');
+      const outPath = path.join(TRANSCODE_DIR, id + '.webm');
+      try {
+        await fsp.mkdir(TRANSCODE_DIR, { recursive: true });
+        await fsp.writeFile(inPath, body);
+        const bitrate = Math.max(12, Math.min(64, Number(url.searchParams.get('bitrate')) || 24));
+        await transcodeToOpus(inPath, outPath, bitrate);
+        const out = await fsp.readFile(outPath);
+        res.writeHead(200, {
+          'content-type': 'audio/webm',
+          'content-length': out.length,
+          'cache-control': 'no-store',
+          'x-original-size': body.length,
+        });
+        res.end(out);
+      } catch (err) {
+        log('转码失败', err.message);
+        res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ detail: '转码失败：' + err.message }));
+      } finally {
+        fsp.unlink(inPath).catch(() => {});
+        fsp.unlink(outPath).catch(() => {});
+      }
+      return;
+    }
+
     if (url.pathname === '/backends') {
       if (req.method === 'POST') {
         const chunks = [];
@@ -311,6 +417,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   log(`有声书阅读器已启动  →  http://${HOST}:${PORT}/`);
   for (const b of BACKENDS) log(`Voicebox 节点「${b.label}」→ ${b.url}`);
+  log(FFMPEG ? `音频压缩: 可用（${FFMPEG}）` : '音频压缩: 不可用（未找到 ffmpeg，将保存原始 WAV）');
   fetch(VOICEBOX_URL + '/health', { signal: AbortSignal.timeout(4000) })
     .then((r) => r.json())
     .then((h) => log(`Voicebox 状态: ${h.status} / 模型已加载=${h.model_loaded} / GPU=${h.gpu_type || '无'}`))

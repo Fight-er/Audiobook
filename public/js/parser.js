@@ -17,6 +17,8 @@ const CLOSERS = new Set(['”', '’', '」', '』', '）', ')', '"', "'", '…'
 const TERMINATORS = new Set(['。', '！', '？', '!', '?', '…', '；', ';', '.']);
 const SOFT_BREAKS = new Set(['，', '、', ',', '：', ':', '—', ' ']);
 
+import { readZipEntries, readZipEntry } from './zip.js';
+
 const CJK_RE = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g;
 
 export function cjkRatio(text) {
@@ -213,7 +215,6 @@ export function splitSentences(text) {
 export function endsSentence(text) {
   return /[。．.！？!?…；;]["'”’」』）)]*$/.test(String(text).trim());
 }
-
 
 function needsSpace(prevChunk, nextPiece) {
   const a = prevChunk[prevChunk.length - 1] || '';
@@ -593,50 +594,6 @@ export function parsePlainText(raw, fallbackTitle = '未命名书籍') {
 /* ------------------------------------------------------------------ */
 /* EPUB                                                                */
 /* ------------------------------------------------------------------ */
-
-async function readZipEntries(buffer) {
-  const dv = new DataView(buffer);
-  const u8 = new Uint8Array(buffer);
-  if (u8.length < 22) throw new Error('文件太小，不是有效的 EPUB');
-  let eocd = -1;
-  const min = Math.max(0, u8.length - 66000);
-  for (let i = u8.length - 22; i >= min; i--) {
-    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
-  }
-  if (eocd < 0) throw new Error('未找到 ZIP 目录结构，请确认这是 .epub 文件');
-  const count = dv.getUint16(eocd + 10, true);
-  let off = dv.getUint32(eocd + 16, true);
-  const decoder = new TextDecoder('utf-8');
-  const entries = new Map();
-  for (let k = 0; k < count; k++) {
-    if (off + 46 > u8.length || dv.getUint32(off, true) !== 0x02014b50) break;
-    const method = dv.getUint16(off + 10, true);
-    const compSize = dv.getUint32(off + 20, true);
-    const nameLen = dv.getUint16(off + 28, true);
-    const extraLen = dv.getUint16(off + 30, true);
-    const commentLen = dv.getUint16(off + 32, true);
-    const localOff = dv.getUint32(off + 42, true);
-    const name = decoder.decode(u8.subarray(off + 46, off + 46 + nameLen));
-    entries.set(name, { name, method, compSize, localOff });
-    off += 46 + nameLen + extraLen + commentLen;
-  }
-  return { entries, dv, u8 };
-}
-
-async function readZipEntry(zip, entry) {
-  const { dv, u8 } = zip;
-  const lo = entry.localOff;
-  if (dv.getUint32(lo, true) !== 0x04034b50) throw new Error('ZIP 局部头损坏');
-  const nameLen = dv.getUint16(lo + 26, true);
-  const extraLen = dv.getUint16(lo + 28, true);
-  const start = lo + 30 + nameLen + extraLen;
-  const data = u8.subarray(start, start + entry.compSize);
-  if (entry.method === 0) return data;
-  if (entry.method !== 8) throw new Error(`不支持的 EPUB 压缩方式 ${entry.method}`);
-  if (typeof DecompressionStream !== 'function') throw new Error('浏览器不支持 DecompressionStream，无法解压 EPUB');
-  const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
 
 const textDecoder = new TextDecoder('utf-8');
 

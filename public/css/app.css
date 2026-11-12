@@ -1034,3 +1034,80 @@ body.notes-open #app { grid-template-columns: 300px minmax(0, 1fr) 340px; }
   font-size: 11.5px;
 }
 .gen-queue .btn { padding: 2px 8px; font-size: 11px; }
+
+/* ------------------------------------------------------------------ */
+/* 阅读：行距段距 / 搜索 / 书签批注                                    */
+/* ------------------------------------------------------------------ */
+
+:root {
+  --reader-line-height: 2.0;
+  --reader-para-gap: 1.05em;
+}
+.read-body { line-height: var(--reader-line-height); }
+.read-body p { margin-bottom: var(--reader-para-gap); }
+
+.read-body .chunk.marked { box-shadow: inset 0 -2px 0 var(--accent-2); }
+.read-body .chunk.flash { animation: fnFlash 1.4s ease; }
+
+.search-input { margin: 4px 10px 8px; width: calc(100% - 20px); }
+
+.search-result {
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-bottom: 2px;
+}
+.search-result:hover { background: var(--bg-elev); }
+.sr-chapter { font-size: 11px; color: var(--text-faint); margin-bottom: 3px; }
+.sr-text { font-size: 12.5px; color: var(--text-dim); line-height: 1.65; }
+.sr-text mark {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 3px;
+  padding: 0 2px;
+  font-weight: 600;
+}
+
+.notes-tabs { display: flex; gap: 6px; padding: 8px 10px 4px; }
+.notes-tab {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  padding: 6px;
+  font-size: 12px;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.notes-tab:hover { background: var(--bg-elev); }
+.notes-tab.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+.mark-item { align-items: flex-start; position: relative; }
+.note-n.is-note { background: var(--accent-2); color: #fff; }
+.mark-excerpt { font-size: 11.5px; color: var(--text-faint); margin-bottom: 3px; }
+.mark-note { font-size: 12.5px; color: var(--text); }
+.mark-del { flex: none; padding: 2px 6px; opacity: .45; }
+.mark-item:hover .mark-del { opacity: 1; }
+
+/* 搜索条 */
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 8px;
+}
+.search-row .search-input { margin: 0; flex: 1; min-width: 0; }
+.search-clear {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text-faint);
+  cursor: pointer;
+  line-height: 1;
+  font-size: 12px;
+}
+.search-clear:hover { color: var(--text); border-color: var(--text-faint); }
+.toc-list { min-height: 20px; }

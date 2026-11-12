@@ -113,12 +113,18 @@ const audios = await store.audioOf(chapters[0].id);
 check('音频记录已入库', audios.length >= 1, String(audios.length));
 check('音频带真实时长', audios.every((a) => a.dur > 0.5), JSON.stringify(audios.map((a) => a.dur)));
 
-// 校验落库的是合法 WAV
+// 校验落库音频：可能是原始 WAV，也可能是压缩后的 WebM/Opus
 const bytes = new Uint8Array(await audios[0].blob.arrayBuffer());
 const tag = String.fromCharCode(...bytes.slice(0, 4)) + '/' + String.fromCharCode(...bytes.slice(8, 12));
-check('落库音频是合法 WAV', tag === 'RIFF/WAVE', tag);
-check('采样率为 24kHz', new DataView(bytes.buffer).getUint32(24, true) === 24000, String(new DataView(bytes.buffer).getUint32(24, true)));
-check('音频体积合理（>50KB）', bytes.length > 50000, `${bytes.length} B`);
+const isWav = tag === 'RIFF/WAVE';
+const isWebm = bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3;
+check('落库音频格式有效（WAV 或 WebM/Opus）', isWav || isWebm, tag);
+if (isWav) {
+  check('采样率为 24kHz', new DataView(bytes.buffer).getUint32(24, true) === 24000, String(new DataView(bytes.buffer).getUint32(24, true)));
+}
+console.log('    落库格式:', isWav ? 'WAV' : 'WebM/Opus', ' 大小:', bytes.length, 'B');
+if (isWav) check('音频体积合理（>50KB）', bytes.length > 50000, `${bytes.length} B`);
+else check('压缩后体积合理（1KB~50KB）', bytes.length > 1000 && bytes.length < 50000, `${bytes.length} B`);
 
 console.log('\n【播放装载】');
 document.querySelector('#pb-play').click();

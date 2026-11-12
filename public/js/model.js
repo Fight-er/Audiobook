@@ -34,6 +34,12 @@ export function renditionById(book, id) {
   return (book?.renditions || []).find((r) => r.id === id) || null;
 }
 
+/** 书籍的「默认音色」版本：老数据（没有版本概念的音频）都归到它名下 */
+export function defaultRenditionId(book) {
+  if (!book) return null;
+  return (book.renditions || [])[0]?.id || book.activeRenditionId || null;
+}
+
 export function activeRendition(book) {
   if (!book) return null;
   return renditionById(book, book.activeRenditionId) || (book.renditions || [])[0] || null;

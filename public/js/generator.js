@@ -222,8 +222,10 @@ export class Generator extends EventTarget {
         });
 
         if (res.status === 'completed') {
-          const blob = await client.audio(rec.id);
+          let blob = await client.audio(rec.id);
           const dur = Number(res.record?.duration) || 0;
+          // 存盘前压缩：WAV -> Opus（体积约 1/10 ~ 1/16）
+          if (settings.compress) blob = await compressBlob(blob);
           await store.putAudio(rid, chapter.id, book.id, index, blob, dur);
           markChunk(chunk, rid, {
             status: 'done',
@@ -233,6 +235,7 @@ export class Generator extends EventTarget {
             meta: {
               profileId: settings.profileId,
               backendProfileId: backend.profileId || settings.profileId,
+              profileName: backend.profileName || '',
               engine: settings.engine || 'qwen',
               modelSize: settings.modelSize || '1.7B',
               // 记录「配置值」而不是解析后的值，否则「自动检测」会被误判为音色变更
@@ -283,6 +286,23 @@ export class Generator extends EventTarget {
     chapter.doneCount = (chapter.chunks || []).filter((c) => Object.values(c.audio || {}).some((a) => a.status === 'done')).length;
     chapter.updatedAt = Date.now();
     store.put('chapters', chapter).catch(() => {});
+  }
+}
+
+/** 交给本地服务端用 ffmpeg 转 Opus；失败或没压小就保留原始 WAV */
+async function compressBlob(blob) {
+  try {
+    const res = await fetch('/transcode', {
+      method: 'POST',
+      headers: { 'content-type': 'audio/wav' },
+      body: blob,
+    });
+    if (!res.ok) return blob;
+    const out = await res.blob();
+    if (!out.size || out.size >= blob.size * 0.85) return blob;
+    return new Blob([out], { type: 'audio/webm' });
+  } catch {
+    return blob;
   }
 }
 
