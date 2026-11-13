@@ -514,5 +514,11 @@ if (pill) {
 await sleep(2500);
 
 
+console.log('\n【章节头部按钮】');
+const metaButtons = [...document.querySelectorAll('.chapter-meta .btn')].map((b) => b.textContent.trim());
+check('没有「从头播放」按钮', !metaButtons.some((t) => t.includes('从头播放')), metaButtons.join('/'));
+check('保留「重新生成」', metaButtons.some((t) => t.includes('重新生成')), metaButtons.join('/'));
+
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);

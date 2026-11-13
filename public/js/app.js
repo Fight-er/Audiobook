@@ -11,7 +11,7 @@ import { Generator } from './generator.js';
 import { exportChapterWav, exportBookWav, downloadBlob, safeFilename } from './export.js';
 import { createZip, readZipEntries, readZipEntry } from './zip.js';
 
-const APP_VERSION = '2026-11-13.6';
+const APP_VERSION = '2026-11-13.8';
 window.__APP_VERSION__ = APP_VERSION;
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -77,6 +77,7 @@ const state = {
   renditionId: null,
   backends: [],
   genQueue: [],
+  issueReview: null,
   caps: { transcode: false },
   tocSelect: false,
   tocSelected: new Set(),
@@ -767,6 +768,8 @@ function renderReader() {
   const totalDur = state.chapterRows.reduce((a, r) => a + (r.dur || 0), 0);
   const chars = chapter.blocks.reduce((a, b) => a + b.text.length, 0);
   const issues = chapterAudioIssues(chapter);
+  const review = state.issueReview && state.issueReview.chapterId === chapter.id ? state.issueReview : null;
+  const reviewMap = new Map((review?.list || []).map((x, idx) => [x.i, idx + 1]));
 
   reader.append(el('div', { class: 'chapter-head' },
     el('div', { class: 'chapter-kicker' }, `${state.book?.title || ''} · 第 ${chapter.index + 1} 章`),
@@ -781,10 +784,10 @@ function renderReader() {
         title: issues.stale && !issues.mismatch
           ? '这些段落用的音色档案在 Voicebox 里已经不存在了（可能是删除后重建）。如果还是同一个声音，更新标记即可'
           : '这些段落是用别的音色 / 引擎生成的',
-        onclick: (e) => { e.stopPropagation(); openVoiceIssueMenu(chapter, e.currentTarget); },
+        onclick: (e) => { e.stopPropagation(); startIssueReview(chapter); },
       }, issues.stale && !issues.mismatch
-        ? `${issues.stale} 段音色档案已失效 · 更新标记`
-        : `${issues.total} 段音色不一致 · 处理`) : null,
+        ? `${issues.stale} 段音色档案已失效 · 定位`
+        : `${issues.total} 段音色不一致 · 定位`) : null,
       chapter.staleChunks
         ? el('button', {
           class: 'chip action warn',
@@ -792,7 +795,6 @@ function renderReader() {
           onclick: () => promptStaleChunks(chapter, { force: true }),
         }, '分段：逐行 · 改为整句')
         : (chapter.verse ? el('span', { class: 'chip', title: '诗体排版已跨行合并成整句朗读' }, '分段：整句合并') : null),
-      el('button', { class: 'btn sm', onclick: () => playChapter(0) }, '从头播放'),
       done < chapter.chunks.length ? el('button', { class: 'btn sm primary', onclick: () => generateChapter(state.chapter) }, '生成语音') : null,
       done > 0 ? el('button', { class: 'btn sm', onclick: () => regenerateChapter(chapter) }, '重新生成') : null
     )
@@ -828,8 +830,9 @@ function renderReader() {
       for (const { ci, seg } of segs) {
         const chunk = chapter.chunks[ci];
         const hasMark = marksInChapter(chapter).some((m) => m.chunkIndex === ci);
+        const issue = reviewMap.get(ci);
         const span = el('span', {
-          class: 'chunk' + (isChunkDone(chunk, ridNow()) ? '' : ' pending-audio') + (hasMark ? ' marked' : ''),
+          class: 'chunk' + (isChunkDone(chunk, ridNow()) ? '' : ' pending-audio') + (hasMark ? ' marked' : '') + (issue ? ' voice-issue' : ''),
           dataset: { i: String(ci) },
           title: isChunkDone(chunk, ridNow()) ? '点击从这里播放（右键更多操作）' : '这一段还没有音频（右键可单独生成）',
           onclick: () => onChunkClick(ci),
@@ -839,6 +842,9 @@ function renderReader() {
           },
         });
         fillSpanWithMarks(span, block, seg);
+        if (issue && chunk.segs && chunk.segs[0] === seg) {
+          span.append(el('sup', { class: 'issue-badge', title: '这段的音色和当前版本不一致' }, String(issue)));
+        }
         p.append(span);
       }
     }
@@ -1001,23 +1007,6 @@ function highlightNotesForChunk(chunkIndex) {
   }
 }
 
-function openVoiceIssueMenu(chapter, anchor) {
-  const issues = chapterAudioIssues(chapter);
-  const rect = anchor?.getBoundingClientRect?.();
-  const x = rect ? rect.left : 200;
-  const y = rect ? rect.bottom + 6 : 200;
-  showContextMenu(x, y, [
-    {
-      label: issues.stale && !issues.mismatch
-        ? `只更新标记（${issues.stale} 段，不重新合成）`
-        : '只更新标记（确认是同一个声音）',
-      action: () => retagChapterAudio(chapter),
-    },
-    '-',
-    { label: '重新生成本章', action: () => regenerateChapter(chapter) },
-    { label: '全书都更新标记', action: () => retagBookAudio() },
-  ]);
-}
 
 function openChunkMenu(x, y, ci) {
   const chapter = state.chapter;
@@ -1244,6 +1233,7 @@ async function openChapter(chapterId, opts = {}) {
   if (baseRid) await store.adoptLegacyAudio(chapter.id, baseRid).catch(() => {});
 
   await ensureChunks(chapter, state.settings.maxChars);
+  if (state.issueReview && state.issueReview.chapterId !== chapter.id) state.issueReview = null;
   state.chapter = chapter;
   state.chapterRows = await store.audioOfRendition(chapter.id, ridNow());
   syncChapterRef(chapter);
@@ -1447,28 +1437,106 @@ function chapterAudioIssues(chapter) {
   const cur = voiceOfRendition(null);
   const rid = ridNow();
   const knownIds = new Set((state.profiles || []).map((p) => p.id));
-  let mismatch = 0;
-  let stale = 0;
+  const list = [];
 
-  for (const c of chapter?.chunks || []) {
-    if (!isChunkDone(c, rid)) continue;
+  (chapter?.chunks || []).forEach((c, i) => {
+    if (!isChunkDone(c, rid)) return;
     const meta = chunkState(c, rid).meta;
-    if (!meta) continue;
+    if (!meta) return;
 
     const sameProfile = (meta.profileId || '') === (cur.profileId || '');
     if (!sameProfile) {
-      if (meta.profileId && !knownIds.has(meta.profileId)) stale++;
-      else mismatch++;
-      continue;
+      list.push({ i, kind: meta.profileId && !knownIds.has(meta.profileId) ? 'stale' : 'mismatch' });
+      return;
     }
-    if ((meta.engine || '') !== (cur.engine || '')) { mismatch++; continue; }
-    if ((meta.modelSize || '') !== (cur.modelSize || '')) { mismatch++; continue; }
+    if ((meta.engine || '') !== (cur.engine || '')) { list.push({ i, kind: 'mismatch' }); return; }
+    if ((meta.modelSize || '') !== (cur.modelSize || '')) { list.push({ i, kind: 'mismatch' }); return; }
     const la = meta.language || 'auto';
     const lb = cur.language || 'auto';
-    if (la === 'auto' || lb === 'auto') continue;
-    if (la !== lb) mismatch++;
+    if (la === 'auto' || lb === 'auto') return;
+    if (la !== lb) list.push({ i, kind: 'mismatch' });
+  });
+
+  const mismatch = list.filter((x) => x.kind === 'mismatch').length;
+  const stale = list.filter((x) => x.kind === 'stale').length;
+  return { mismatch, stale, total: list.length, list };
+}
+
+/* ---------------- 问题段落巡检 ---------------- */
+
+/** 只重做音色不一致的段落，其余段落原样保留 */
+async function regenerateIssueChunks(chapter = state.chapter) {
+  if (!canGenerate({ allowBusy: true }) || !chapter) return;
+  const issues = chapterAudioIssues(chapter);
+  const indices = issues.list.map((x) => x.i);
+  if (!indices.length) { toast('本章没有需要重新生成的段落'); return; }
+
+  const rest = chapter.chunks.length - indices.length;
+  const ok2 = await confirmDialog({
+    title: '重新生成不一致的段落',
+    message: `只会重新合成这 ${indices.length} 段，其余 ${rest} 段保持不动。\n\n会用当前音色（${profileName(state.settings.profileId)}）重新生成。`,
+    confirmText: '重新生成',
+  });
+  if (!ok2) return;
+
+  const rid = ridNow();
+  for (const i of indices) {
+    await store.deleteChunkAudio(chapter.id, rid, i).catch(() => {});
+    resetChunk(chapter.chunks[i], rid);
   }
-  return { mismatch, stale, total: mismatch + stale };
+  chapter.updatedAt = Date.now();
+  await store.put('chapters', chapter);
+  state.chapterRows = await store.audioOfRendition(chapter.id, rid);
+  syncChapterRef(chapter);
+  state.issueReview = null;
+  updateIssueBar();
+  renderReader();
+  renderToc();
+  updateChapterButtons();
+  await queueOrRun(
+    [{ book: state.book, chapter, only: new Set(indices) }],
+    `${chapter.title} · ${indices.length} 段`
+  );
+}
+
+function startIssueReview(chapter) {
+  const issues = chapterAudioIssues(chapter);
+  const review = state.issueReview && state.issueReview.chapterId === chapter.id ? state.issueReview : null;
+  const reviewMap = new Map((review?.list || []).map((x, idx) => [x.i, idx + 1]));
+  if (!issues.list.length) { toast('本章没有音色不一致的段落'); return; }
+  state.issueReview = { chapterId: chapter.id, list: issues.list, at: 0 };
+  renderReader();
+  updateIssueBar();
+  scrollToChunk(issues.list[0].i);
+  toast('已标记 ' + issues.list.length + ' 处，可用下方按钮逐段查看', 'ok');
+}
+
+function exitIssueReview() {
+  if (!state.issueReview) return;
+  state.issueReview = null;
+  renderReader();
+  updateIssueBar();
+}
+
+function navigateIssue(delta) {
+  const r = state.issueReview;
+  if (!r || !r.list.length) return;
+  r.at = (r.at + delta + r.list.length) % r.list.length;
+  updateIssueBar();
+  scrollToChunk(r.list[r.at].i);
+}
+
+function updateIssueBar() {
+  const bar = document.getElementById('issue-bar');
+  if (!bar) return;
+  const r = state.issueReview;
+  bar.classList.toggle('hidden', !r);
+  if (!r) return;
+  const text = document.getElementById('issue-bar-text');
+  if (text) {
+    const staleOnly = r.list.every((x) => x.kind === 'stale');
+    text.textContent = (staleOnly ? '音色档案失效 ' : '音色不一致 ') + (r.at + 1) + '/' + r.list.length;
+  }
 }
 
 function chapterMismatchCount(chapter) {
@@ -1498,6 +1566,7 @@ async function retagChapterAudio(chapter, { silent = false } = {}) {
     chapter.updatedAt = Date.now();
     await store.put('chapters', chapter).catch(() => {});
   }
+  if (state.issueReview?.chapterId === chapter.id) { state.issueReview = null; updateIssueBar(); }
   if (!silent) {
     if (state.chapter?.id === chapter.id) { renderReader(); }
     toast(n ? `已更新 ${n} 段的音色标记` : '没有需要更新的段落', n ? 'ok' : '');
@@ -3219,6 +3288,11 @@ function wireGlobal() {
     toast('正在停止…');
   };
   q('#gen-queue-clear').onclick = () => clearGenQueue();
+  q('#issue-prev').onclick = () => navigateIssue(-1);
+  q('#issue-next').onclick = () => navigateIssue(1);
+  q('#issue-close').onclick = () => exitIssueReview();
+  q('#issue-retag').onclick = () => retagChapterAudio(state.chapter);
+  q('#issue-regen').onclick = () => regenerateIssueChunks(state.chapter);
   q('#import-file').onchange = async (e) => {
     const f = e.target.files?.[0];
     e.target.value = '';

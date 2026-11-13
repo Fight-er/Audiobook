@@ -1,7 +1,7 @@
 # 有声书 · Audiobook Reader
 
 一个跑在本机的**有声书阅读器 + 离线语音书生成器**。导入 `.txt` / `.md` / `.epub`，
-阅读时逐段高亮朗读；点一下就能把整章（或整本）书用本机 **Voicebox / Qwen3-TTS** 合成成音频，
+阅读时逐段高亮朗读；点一下就能把整章（或整本）书用本机 **[Voicebox](https://github.com/jamiepine/voicebox) / Qwen3-TTS** 合成成音频，
 音频存在浏览器本地数据库里 —— **一次生成，永久离线可听**。
 
 ```
@@ -28,6 +28,7 @@
 
 ```bat
 :: 1) 确保 Voicebox 桌面应用已启动（http://127.0.0.1:17493/docs 能打开）
+::    Voicebox 项目：https://github.com/jamiepine/voicebox
 :: 2) 启动阅读器
 start.cmd
 ::    或
@@ -116,6 +117,9 @@ D:\Audiobook
 ```
 
 ## 用到的 Voicebox 接口
+
+> **Voicebox 项目地址：<https://github.com/jamiepine/voicebox>**
+> 本项目只做阅读器与生成编排，语音合成完全依赖 Voicebox（本机运行，支持 Qwen3-TTS 与音色克隆）。
 
 | 用途 | 接口 |
 | --- | --- |
@@ -352,3 +356,31 @@ EPUB 的诗节空行需要重新解析才能恢复——如果是旧版本导入
 命中后把数字从**朗读文本**里去掉，同时记录到 `block.lineNo`，阅读时在行末以小号数字显示（鼠标悬停提示「原书第 N 行」）。
 
 已经导入过的书，**下次打开章节会自动补做这一步**（行号会立刻显示出来）。如果该章已经生成过音频，声音里的行号需要重新生成才会消失。
+
+### 音色不一致：定位与巡检
+
+章节头提示改成可点击的「定位」：
+
+- 点击后**本章所有音色不一致的段落**都会标上浅橙色底纹 + 右下角橙色序号
+- 自动滚到第一处
+- 底部出现巡检条：`音色不一致 1/5` + ↑ / ↓ 逐段跳转 + 「只更新标记」/「重新生成」/「退出」
+- 处理完（重标记或重新生成）会自动收起并清除标记；切换章节也会自动退出
+
+### 只重做不一致的段落
+
+巡检条上的「重新生成」现在**只重新合成那几段**：
+
+- 确认框会说明「只会重新合成 N 段，其余 M 段保持不动」
+- 只删除并重做这几段的音频，其它段落的音频原样保留
+- 章节头的「重新生成」仍然是整章重做（那是显式操作）
+
+## 依赖与致谢
+
+| 依赖 | 说明 |
+| --- | --- |
+| [Voicebox](https://github.com/jamiepine/voicebox) | 本机语音合成服务（Qwen3-TTS / 音色克隆），负责把文字变成音频 |
+| [Node.js](https://nodejs.org/) ≥ 18 | 静态服务 + 反向代理（零第三方依赖） |
+| [ffmpeg](https://ffmpeg.org/) | 可选；用于把 WAV 压缩成 Opus（体积约 1/10），没装则保存原始 WAV |
+| [jsdom](https://github.com/jsdom/jsdom) / [fake-indexeddb](https://github.com/dumbmatter/fakeIndexedDB) | 仅测试用，跑 `node tools/*.mjs` 时需要 |
+
+语音合成全部来自 [Voicebox](https://github.com/jamiepine/voicebox)，本项目不包含任何模型文件。

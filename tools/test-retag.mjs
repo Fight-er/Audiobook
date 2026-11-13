@@ -110,21 +110,32 @@ await sleep(1400);
 const meta = document.querySelector('.chapter-meta')?.textContent || '';
 check('提示文案是「音色档案已失效」', meta.includes('音色档案已失效'), meta.trim());
 check('没有误报成「音色不一致」', !meta.includes('音色不一致'), meta.trim());
-check('提示里包含「更新标记」', meta.includes('更新标记'), meta.trim());
+check('提示里包含「定位」', meta.includes('定位'), meta.trim());
 
-console.log('\n【一键重标记】');
-const chip = [...document.querySelectorAll('.chapter-meta .chip')].find((n) => n.textContent.includes('更新标记'));
+console.log('\n【点击定位：标记所有问题段落】');
+const chip = [...document.querySelectorAll('.chapter-meta .chip')].find((n) => n.textContent.includes('定位'));
 check('找到提示按钮', !!chip);
 chip.click();
-await sleep(200);
-const menu = document.querySelector('#ctx-menu');
-check('弹出处理菜单', !!menu);
-const items = [...(menu?.querySelectorAll('.ctx-item') || [])].map((n) => n.textContent.trim());
-check('菜单里有「只更新标记」', items.some((t) => t.includes('只更新标记')), items.join(' / '));
-check('菜单里也有「重新生成本章」', items.some((t) => t.includes('重新生成本章')), items.join(' / '));
+await sleep(400);
 
-[...menu.querySelectorAll('.ctx-item')].find((n) => n.textContent.includes('只更新标记')).click();
-await sleep(600);
+const marked = [...document.querySelectorAll('.read-body .chunk.voice-issue')];
+check('所有问题段落被标记', marked.length === 3, String(marked.length));
+check('每段带序号角标', marked.every((n) => n.querySelector('sup.issue-badge')), String(marked.filter((n) => n.querySelector('sup.issue-badge')).length));
+
+const bar = document.getElementById('issue-bar');
+check('出现巡检条', !!bar && !bar.classList.contains('hidden'));
+check('巡检条显示进度', (bar?.textContent || '').includes('1/3'), bar?.textContent?.trim());
+
+document.getElementById('issue-next').click();
+await sleep(300);
+check('可以翻到下一处', (bar.textContent || '').includes('2/3'), bar.textContent.trim());
+document.getElementById('issue-prev').click();
+await sleep(300);
+check('可以回到上一处', (bar.textContent || '').includes('1/3'), bar.textContent.trim());
+
+console.log('\n【一键重标记】');
+document.getElementById('issue-retag').click();
+await sleep(700);
 
 const ch = await store.getChapter(chapter.id);
 check('所有段落的 profileId 已更新', ch.chunks.every((c) => c.audio[rid].meta.profileId === 'p-new'),
@@ -132,6 +143,9 @@ check('所有段落的 profileId 已更新', ch.chunks.every((c) => c.audio[rid]
 check('音频条数没变（没有重新合成）', (await store.audioOfRendition(chapter.id, rid)).length === 3);
 check('提示消失', !(document.querySelector('.chapter-meta')?.textContent || '').includes('音色档案已失效'),
   document.querySelector('.chapter-meta')?.textContent?.trim());
+check('巡检条自动收起', document.getElementById('issue-bar')?.classList.contains('hidden'));
+check('段落标记已清除', document.querySelectorAll('.read-body .chunk.voice-issue').length === 0,
+  String(document.querySelectorAll('.read-body .chunk.voice-issue').length));
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);

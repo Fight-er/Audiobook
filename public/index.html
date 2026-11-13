@@ -6,7 +6,7 @@
   <title>有声书 · 本地朗读与离线语音书生成</title>
   <meta name="description" content="本地有声书阅读器：导入 txt / epub，用 Voicebox 在本机 GPU 上离线合成语音书，断网也能继续听。" />
   <meta name="theme-color" content="#0e1014" />
-  <link rel="stylesheet" href="/css/app.css?v=19" />
+  <link rel="stylesheet" href="/css/app.css?v=21" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
 </head>
@@ -178,6 +178,15 @@
 
   <div id="toast-wrap"></div>
 
+  <div id="issue-bar" class="issue-bar hidden">
+    <span id="issue-bar-text">音色不一致</span>
+    <button class="btn ghost sm" id="issue-prev" title="上一处">↑</button>
+    <button class="btn ghost sm" id="issue-next" title="下一处">↓</button>
+    <button class="btn sm" id="issue-retag">只更新标记</button>
+    <button class="btn sm" id="issue-regen">重新生成</button>
+    <button class="btn ghost sm" id="issue-close">退出</button>
+  </div>
+
   <button id="gen-pill" class="gen-pill hidden" title="展开生成面板">
     <span class="gp-dot"></span><span id="gen-pill-text">生成中…</span>
   </button>
@@ -266,7 +275,7 @@
     })();
   </script>
 
-  <script type="module" src="/js/app.js?v=19"></script>
+  <script type="module" src="/js/app.js?v=21"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {
