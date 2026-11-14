@@ -11,11 +11,60 @@ import { Generator } from './generator.js';
 import { exportChapterWav, exportBookWav, downloadBlob, safeFilename } from './export.js';
 import { createZip, readZipEntries, readZipEntry } from './zip.js';
 
-const APP_VERSION = '2026-11-13.8';
+const APP_VERSION = '2026-11-14.3';
 window.__APP_VERSION__ = APP_VERSION;
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+/* ---------------- 手机端侧栏抽屉 ---------------- */
+
+function setDrawer(open) {
+  const sidebar = document.getElementById('sidebar');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  if (sidebar) sidebar.classList.toggle('open', !!open);
+  if (backdrop) backdrop.classList.toggle('show', !!open);
+  document.body.classList.toggle('drawer-open', !!open);
+}
+
+function closeDrawer() {
+  if (document.body.classList.contains('drawer-open')) setDrawer(false);
+}
+
+function initDrawer() {
+  const menu = document.getElementById('btn-menu');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  const sidebar = document.getElementById('sidebar');
+  if (menu) {
+    menu.onclick = () => setDrawer(!sidebar?.classList.contains('open'));
+  }
+  if (backdrop) backdrop.onclick = () => setDrawer(false);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeDrawer();
+  });
+  // 竖屏转横屏时收起
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 900) closeDrawer();
+  });
+}
+
+/** 局域网 HTTP 下浏览器会禁用 Service Worker，离线就打不开 —— 提前说明 */
+function hintOfflineAvailability() {
+  let secure = true;
+  try {
+    const host = (window.location && window.location.hostname) || '';
+    secure = !!window.isSecureContext || host === 'localhost' || host === '127.0.0.1' || host === '';
+  } catch { secure = true; }
+  const hasSW = typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
+  state.offlineReady = secure && hasSW;
+  if (!state.offlineReady && !state.settings?.offlineHintShown) {
+    setTimeout(() => {
+      toast('局域网 HTTP 下无法离线缓存；想在手机上断网阅读，请用 HTTPS 部署（见说明）', '');
+    }, 1600);
+    state.settings = { ...(state.settings || {}), offlineHintShown: true };
+    saveSettings();
+  }
+}
 
 /** 本地服务端能力：是否支持 ffmpeg 转码压缩 */
 async function loadCapabilities() {
@@ -77,6 +126,7 @@ const state = {
   renditionId: null,
   backends: [],
   genQueue: [],
+  queueOpen: true,
   issueReview: null,
   caps: { transcode: false },
   tocSelect: false,
@@ -225,25 +275,59 @@ function applyFontSize() {
 /* 语音服务状态                                                        */
 /* ------------------------------------------------------------------ */
 
+/** 真正能用来合成的节点（在线 + 有可用音色） */
+function usableBackends() {
+  return activeBackends().filter((b) => {
+    try { return !!nodeProfileFor(b.id).prof; } catch { return false; }
+  });
+}
+
+/** 本机 + 局域网一起判断，别再只看本机 */
+function updateServiceChip() {
+  const chip = $('#chip-voicebox');
+  const banner = $('#offline-banner');
+  if (!chip) return;
+  const localOk = !!state.online;
+  const nodes = usableBackends();
+
+  if (localOk) {
+    chip.className = 'chip ok';
+    chip.textContent = state.health?.model_loaded ? '语音服务就绪' : '语音服务在线';
+    chip.title = `本机 GPU: ${state.health?.gpu_type || '未知'} · 模型已加载: ${state.health?.model_loaded ? '是' : '否'}`;
+    if (banner) banner.classList.add('hidden');
+    return;
+  }
+  if (nodes.length) {
+    chip.className = 'chip ok';
+    chip.textContent = `局域网 ${nodes.length} 个节点`;
+    chip.title = '本机 Voicebox 未连接，合成会走：' + nodes.map((n) => n.label).join('、');
+    if (banner) banner.classList.add('hidden');
+    return;
+  }
+  chip.className = 'chip bad';
+  chip.textContent = '语音服务离线';
+  chip.title = '本机和局域网都没有可用的 Voicebox';
+  if (banner) {
+    banner.querySelector('span')?.replaceChildren(document.createTextNode(
+      '没有可用的语音服务：本机 Voicebox 未启动，局域网节点也都连不上。你仍可播放已生成的音频。'
+    ));
+    banner.classList.remove('hidden');
+  }
+}
+
 async function refreshHealth({ silent = true } = {}) {
   const chip = $('#chip-voicebox');
   try {
     const h = await api.health();
     state.health = h;
     state.online = true;
-    chip.className = 'chip ok';
-    chip.textContent = h.model_loaded ? '语音服务就绪' : '语音服务在线';
-    chip.title = `GPU: ${h.gpu_type || '未检测到'} · 模型已加载: ${h.model_loaded ? '是' : '否'}`;
-    $('#offline-banner').classList.add('hidden');
     if (!silent) toast('已连接 Voicebox');
   } catch (err) {
     state.online = false;
     state.health = null;
-    chip.className = 'chip bad';
-    chip.textContent = '语音服务离线';
     chip.title = err.message;
-    $('#offline-banner').classList.remove('hidden');
   }
+  updateServiceChip();
   updateChapterButtons();
 }
 
@@ -603,6 +687,11 @@ async function migrateLineNumbers(chapter) {
     return 0;
   }
   chapter.blocks = res.blocks;
+  // 文本变短后，注释位置可能越界，夹回末尾
+  for (const b of chapter.blocks) {
+    if (!b.marks) continue;
+    for (const m of b.marks) if (m.at > b.text.length) m.at = b.text.length;
+  }
   const baseRid = defaultRenditionId(state.book) || ridNow();
   const hasAudio = (chapter.chunks || []).some((c) => isChunkDone(c, baseRid));
   // 已经有音频就不动分段（避免和已有声音错位），等用户重新生成时自然带上新文本
@@ -863,7 +952,12 @@ function renderReader() {
 }
 
 /** 把一段原文写进 span，并在脚注位置插入可点击的角标 */
-function fillSpanWithMarks(span, block, seg) {  const marks = (block.marks || []).filter((m) => m.at >= seg.from && m.at <= seg.to);
+function fillSpanWithMarks(span, block, seg) {
+  const len = block.text.length;
+  // 老数据里注释位置可能因为后来剥掉行号而越界，夹回文本末尾
+  const marks = (block.marks || [])
+    .map((m) => ({ n: m.n, at: Math.min(m.at, len) }))
+    .filter((m) => m.at >= seg.from && m.at <= seg.to);
   if (!marks.length) {
     span.textContent = block.text.slice(seg.from, seg.to);
     return;
@@ -986,7 +1080,18 @@ function focusNote(n) {
 /** 点击右侧注释：定位正文角标 */
 function focusRef(n) {
   const ref = $(`.fnref[data-n="${n}"]`);
-  if (!ref) return;
+  if (!ref) {
+    // 没有角标（旧数据或跨块）时，退回到引用该注释的段落
+    const ci = (state.chapter?.chunks || []).findIndex((c) => (c.notes || []).includes(n));
+    if (ci >= 0) {
+      scrollToChunk(ci);
+      $$('.note-item.active').forEach((x) => x.classList.remove('active'));
+      $(`.note-item[data-n="${n}"]`)?.classList.add('active');
+      return;
+    }
+    toast('这一条注释在正文里没有对应标记');
+    return;
+  }
   ref.scrollIntoView({ block: 'center', behavior: 'smooth' });
   ref.classList.add('flash');
   setTimeout(() => ref.classList.remove('flash'), 1400);
@@ -1193,6 +1298,7 @@ function highlightChunk(chunkIndex) {
 /* ------------------------------------------------------------------ */
 
 async function openBook(book, opts = {}) {
+  closeDrawer();
   const full = await store.getBook(book.id);
   if (!full) return;
   if (tocSearchBookId !== full.id) {
@@ -1225,6 +1331,7 @@ async function openBook(book, opts = {}) {
 }
 
 async function openChapter(chapterId, opts = {}) {
+  closeDrawer();
   const chapter = await store.getChapter(chapterId);
   if (!chapter) return;
 
@@ -1784,6 +1891,7 @@ async function runGeneration(targets, title) {
     // 队列里还有任务就接着做
     if (state.genQueue.length) {
       const next = state.genQueue.shift();
+      updateGenQueueUI();
       setTimeout(() => {
         if (!state.generating) runGeneration(next.targets, next.title);
       }, 600);
@@ -1806,15 +1914,53 @@ async function queueOrRun(targets, title) {
 }
 
 function updateGenQueueUI() {
-  const n = state.genQueue.length;
+  const jobs = state.genQueue.length;
   const box = document.getElementById('gen-queue');
-  if (box) {
-    box.classList.toggle('hidden', n === 0);
-    const label = box.querySelector('span');
-    if (label) label.textContent = '队列中还有 ' + n + ' 个任务';
-  }
+  const list = document.getElementById('gen-queue-list');
+  const count = document.getElementById('gen-queue-count');
   const btn = document.getElementById('gen-queue-clear');
-  if (btn) btn.disabled = n === 0;
+
+  let chapters = 0;
+  for (const job of state.genQueue) chapters += job.targets.length;
+
+  if (box) box.classList.toggle('hidden', jobs === 0);
+  if (btn) btn.disabled = jobs === 0;
+  if (count) {
+    count.textContent = jobs
+      ? `队列中 ${chapters} 章 / ${jobs} 个任务`
+      : '队列为空';
+  }
+  if (box) box.classList.toggle('open', state.queueOpen !== false);
+
+  if (list) {
+    list.innerHTML = '';
+    state.genQueue.forEach((job, ji) => {
+      for (const t of job.targets) {
+        const ch = t.chapter;
+        const pending = t.only ? t.only.size : Math.max(0, (ch.chunks || []).length - chapterDoneCount(ch));
+        list.append(el('li', { class: 'gq-item' },
+          el('span', { class: 'gq-idx' }, String(ji + 1)),
+          el('span', { class: 'gq-title', title: ch.title }, ch.title),
+          el('span', { class: 'gq-meta' }, `${pending} 段`),
+          el('button', {
+            class: 'gq-del',
+            title: '从队列移除',
+            onclick: (e) => { e.stopPropagation(); removeQueueTarget(job, t); },
+          }, '✕'),
+        ));
+      }
+    });
+  }
+}
+
+/** 从队列里去掉某一章（所在任务空了就整条移除） */
+function removeQueueTarget(job, target) {
+  const at = state.genQueue.indexOf(job);
+  if (at < 0) return;
+  job.targets = job.targets.filter((t) => t !== target);
+  if (!job.targets.length) state.genQueue.splice(at, 1);
+  updateGenQueueUI();
+  toast('已从队列移除：' + (target.chapter?.title || '任务'));
 }
 
 function clearGenQueue() {
@@ -1852,8 +1998,23 @@ async function generateSelectedChapters() {
 
 function canGenerate({ allowBusy = false } = {}) {
   if (state.generating && !allowBusy) { toast('已有生成任务在进行中'); return false; }
-  if (!state.online) { toast('语音服务未连接，无法生成', 'err'); return false; }
-  if (!state.settings.profileId) { toast('请先在设置里选择音色', 'err'); openSettingsModal(); return false; }
+
+  // 本机没开 Voicebox 也没关系，只要局域网里有节点能用
+  if (!state.online && !usableBackends().length) {
+    const enabled = (state.backends || []).filter((b) => (state.settings.backends || {})[b.id] !== false);
+    toast(enabled.length
+      ? `没有可用的语音节点（本机离线，${enabled.length} 个节点都连不上或没有音色）`
+      : '没有可用的语音节点：本机 Voicebox 未启动，也没有勾选局域网节点', 'err');
+    return false;
+  }
+
+  const rendition = activeRendition(state.book);
+  const wantProfile = rendition?.profileId || state.settings.profileId;
+  if (!wantProfile && !usableBackends().length) {
+    toast('请先在设置里选择音色', 'err');
+    openSettingsModal();
+    return false;
+  }
   return true;
 }
 
@@ -2611,7 +2772,11 @@ function openSettingsModal() {
       el('div', { class: 'field' }, el('label', {}, curRendition ? `音色（当前版本：${curRendition.name}）` : '音色（新书默认）'), profileSelect,
         el('div', { class: 'hint' }, curRendition
           ? '这里的改动会写进当前音色版本；想保留旧版本请先用顶栏「音色 → 新建版本」'
-          : (state.profiles.length ? `共 ${state.profiles.length} 个音色可用` : '请先启动 Voicebox 桌面应用'))),
+          : (state.profiles.length
+            ? `共 ${state.profiles.length} 个音色可用`
+            : (usableBackends().length
+              ? '本机 Voicebox 未连接；生成时会自动匹配局域网节点上的音色'
+              : '请先启动 Voicebox 桌面应用（本机或局域网任一节点）')))),
       el('div', { class: 'field' }, el('label', {}, '朗读语言'), langSelect,
         el('div', { class: 'hint' }, '「自动检测」会按章节文本判断中/英文')),
     ),
@@ -2961,6 +3126,7 @@ async function refreshBackends() {
     state.backends = [];
   }
   renderRenditionButton();
+  updateServiceChip();
   return state.backends;
 }
 
@@ -2980,6 +3146,7 @@ async function refreshBackendProfiles() {
     }
   }));
   state.backendProfiles = map;
+  updateServiceChip();
   return map;
 }
 
@@ -3288,6 +3455,10 @@ function wireGlobal() {
     toast('正在停止…');
   };
   q('#gen-queue-clear').onclick = () => clearGenQueue();
+  q('#gen-queue-toggle').onclick = () => {
+    state.queueOpen = state.queueOpen === false;
+    updateGenQueueUI();
+  };
   q('#issue-prev').onclick = () => navigateIssue(-1);
   q('#issue-next').onclick = () => navigateIssue(1);
   q('#issue-close').onclick = () => exitIssueReview();
@@ -3400,6 +3571,8 @@ async function boot() {
   wireGlobal();
 
   // 先连服务：即使后面恢复进度出错，状态栏也不会一直停在「检测中」
+  initDrawer();
+  hintOfflineAvailability();
   await loadCapabilities();
   await refreshBackends().catch(() => {});
   await refreshHealth({ silent: true }).catch(() => {});

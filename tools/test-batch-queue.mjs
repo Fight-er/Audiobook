@@ -194,6 +194,31 @@ check('生成中再次请求会进队列', toast.includes('已加入队列') || 
 const queuedShown = !!document.querySelector('#gen-queue:not(.hidden)');
 check('面板显示队列状态', queuedShown, String(queuedShown));
 
+/* 队列展开 */
+const gqItems = [...document.querySelectorAll('#gen-queue-list .gq-item')];
+check('队列默认展开并列出章节', gqItems.length >= 1, String(gqItems.length));
+check('队列项显示章节名', (gqItems[0]?.textContent || '').includes('第三章'), gqItems[0]?.textContent?.trim());
+check('队列项显示待生成段数', /\d+\s*段/.test(gqItems[0]?.textContent || ''), gqItems[0]?.textContent?.trim());
+check('计数显示章数', (document.getElementById('gen-queue-count')?.textContent || '').includes('章'),
+  document.getElementById('gen-queue-count')?.textContent);
+
+document.getElementById('gen-queue-toggle').click();
+await sleep(80);
+check('可以折叠', !document.getElementById('gen-queue').classList.contains('open'));
+document.getElementById('gen-queue-toggle').click();
+await sleep(80);
+check('可以再展开', document.getElementById('gen-queue').classList.contains('open'));
+
+/* 移除某一章，再加回来，保持后续流程 */
+document.querySelector('#gen-queue-list .gq-del').click();
+await sleep(120);
+check('可以把章节移出队列', document.querySelectorAll('#gen-queue-list .gq-item').length === 0,
+  String(document.querySelectorAll('#gen-queue-list .gq-item').length));
+document.querySelector('#btn-generate-chapter').click();
+await sleep(200);
+check('重新排队后又出现了', document.querySelectorAll('#gen-queue-list .gq-item').length >= 1,
+  String(document.querySelectorAll('#gen-queue-list .gq-item').length));
+
 // 等两个任务都跑完
 const t1 = Date.now();
 while (Date.now() - t1 < 40000) {

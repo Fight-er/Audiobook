@@ -1,18 +1,20 @@
 /* 离线外壳缓存：界面本身可离线打开；音频数据在 IndexedDB 中，无需经过 SW */
-const CACHE = 'audiobook-shell-v21';
+const CACHE = 'audiobook-shell-v25';
 const ASSETS = [
   '/',
   '/index.html',
   '/css/app.css',
-  '/css/app.css?v=21',
+  '/css/app.css?v=25',
   '/js/app.js',
-  '/js/app.js?v=21',
+  '/js/app.js?v=25',
   '/js/api.js',
   '/js/store.js',
   '/js/parser.js',
   '/js/player.js',
   '/js/generator.js',
-  '/js/export.js',\n  '/js/model.js',\n  '/js/zip.js',
+  '/js/export.js',
+  '/js/model.js',
+  '/js/zip.js',
   '/manifest.webmanifest',
   '/icon.svg',
 ];

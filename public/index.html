@@ -6,7 +6,7 @@
   <title>有声书 · 本地朗读与离线语音书生成</title>
   <meta name="description" content="本地有声书阅读器：导入 txt / epub，用 Voicebox 在本机 GPU 上离线合成语音书，断网也能继续听。" />
   <meta name="theme-color" content="#0e1014" />
-  <link rel="stylesheet" href="/css/app.css?v=21" />
+  <link rel="stylesheet" href="/css/app.css?v=25" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
 </head>
@@ -51,9 +51,13 @@
         </div>
       </div>
     </aside>
+    <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
 
     <main id="main">
       <div class="topbar">
+        <button class="btn menu-btn" id="btn-menu" title="书库与目录">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+        </button>
         <div style="min-width:0;flex:1">
           <div class="topbar-title" id="top-title">未打开书籍</div>
           <div class="topbar-sub" id="top-sub">导入一本 txt 或 epub 开始</div>
@@ -61,12 +65,12 @@
         <div class="spacer"></div>
         <button class="btn" id="btn-rendition" disabled title="音色版本：同一本书可保存多个声音">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
-          <span>音色</span>
+          <span class="btn-label optional">音色</span>
         </button>
         <span class="chip" id="chip-voicebox" title="Voicebox 连接状态">检测中…</span>
         <button class="btn" id="btn-notes" title="显示 / 隐藏右侧注释对照栏" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v13H8l-4 4z"/><path d="M9 9h7M9 12h4"/></svg>
-          注释
+          <span class="btn-label optional">注释</span>
         </button>
         <button class="btn" id="btn-generate-chapter" disabled title="生成当前章节的语音书（生成中点击会加入队列）">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>
@@ -74,7 +78,7 @@
         </button>
         <button class="btn" id="btn-export-chapter" disabled title="把本章已生成的音频导出为 WAV">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
-          导出
+          <span class="btn-label optional">导出</span>
         </button>
         <button class="btn" id="btn-more" title="更多操作：重新生成、清除音频">⋯</button>
       </div>
@@ -100,8 +104,14 @@
           <div class="gen-stats"><span id="gen-progress">0 / 0</span><span id="gen-eta"></span></div>
           <div class="gen-current" id="gen-current">准备中…</div>
           <div class="gen-queue hidden" id="gen-queue">
-            <span>队列中还有 0 个任务</span>
-            <button class="btn ghost sm" id="gen-queue-clear">清空</button>
+            <div class="gq-head" id="gen-queue-toggle">
+              <span id="gen-queue-count">队列中还有 0 个任务</span>
+              <span class="gq-caret">▾</span>
+            </div>
+            <ul class="gq-list" id="gen-queue-list"></ul>
+            <div class="gq-foot">
+              <button class="btn ghost sm" id="gen-queue-clear">清空队列</button>
+            </div>
           </div>
           <div class="gen-actions">
             <button class="btn sm" id="gen-pause">暂停</button>
@@ -275,7 +285,7 @@
     })();
   </script>
 
-  <script type="module" src="/js/app.js?v=21"></script>
+  <script type="module" src="/js/app.js?v=25"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {
